@@ -1,0 +1,42 @@
+DeepSeek Harness 便携版 - 使用说明
+====================================
+
+一、这是什么
+  免安装、可移植的 DeepSeek Harness 桌面版。内嵌 Node.js 运行时和
+  dsh 全部依赖，任意 Windows 电脑双击即可运行，无需安装 Node.js。
+
+二、怎么用
+  1. 将整个文件夹复制到任意位置（U盘、移动硬盘、桌面均可）。
+  2. 双击“启动-DeepSeek-Harness.cmd”。
+  3. 打开浏览器访问 http://127.0.0.1:3080
+  4. 在设置中填入 DeepSeek API Key 后即可使用。
+  5. 关闭弹出的命令行窗口即停止。
+
+  命令行用法：
+    dsh.cmd web                               启动 Web 界面
+    dsh.cmd --profile headless "问题"         无界面执行一个任务
+    dsh.cmd plugin --profile web add <包名>   安装插件
+
+三、数据都在哪里
+  全部数据保存在本文件夹的 data\ 目录：
+    data\settings.yaml      设置
+    data\.credentials.yaml  API Key 等凭据
+    data\.agents\           技能（skills）
+    data\profiles\          各配置方案与插件
+    data\sessions\ 等       会话历史
+  把整个文件夹复制到别的电脑，配置和数据直接可用。
+
+四、如何升级
+  官方 dsh 发布新版本后：
+  - 文件夹版：双击“升级-便携版.cmd”，联网自动更新，data\ 数据原样保留。
+  - 单文件 exe 版：需要在构建机上重新构建（pwsh -ExecutionPolicy Bypass
+    -File build-all.ps1，自动保留 data\）。
+  升级前建议把 data\ 文件夹复制一份备份。
+
+五、常见问题
+  - 端口被占用：先运行 Stop-DeepSeek-Harness.cmd，或用 dsh.cmd web --port 3081
+  - 想重置：删除 data\ 文件夹
+  - 杀毒软件提示：便携版不写注册表、不改系统，可放心使用
+
+免责声明：本便携版为第三方封装，DeepSeek Harness 本体为 MIT 开源项目，
+请遵守 DeepSeek 平台及开源许可条款。

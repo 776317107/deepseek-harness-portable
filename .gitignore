@@ -1,0 +1,23 @@
+# npm 缓存
+.npm-cache/
+
+# 构建产物(可重新构建)
+dist/
+
+# build/ 下的下载物、缓存与中间产物(源码在 build/portable/ 下)
+build/node-v24.19.0-win-x64.zip
+build/node-extract/
+build/7zr.exe
+build/7z2602-extra.7z
+build/data-backup/
+build/portable/work/
+
+# 上游官方源码(仅本地参考,不随仓库提交)
+deepseek-harness-master/
+
+# 依赖
+node_modules/
+
+# 日志与临时文件
+*.log
+*.tmp
