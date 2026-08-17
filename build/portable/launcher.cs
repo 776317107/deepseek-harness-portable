@@ -94,9 +94,21 @@ class DshLauncher
             string nodeExe = Path.Combine(install, NodeRel);
             string entry = Path.Combine(install, DshEntryRel);
 
-            if (!File.Exists(marker))
+            // The payload can change on rebuilds even at the same dsh version
+            // (bug fixes, newly bundled files). Record the embedded zip sizes
+            // in the marker so a rebuilt exe re-extracts instead of reusing a
+            // stale cache; an old-format marker also fails the match.
+            string expectedMarker = Version + "|" + GetResourceSize("dsh.zip") + "|" + GetResourceSize("node.zip");
+            bool needsExtract = !File.Exists(marker);
+            if (!needsExtract)
             {
-                Console.Error.WriteLine("dsh: first run - extracting embedded runtime to " + install);
+                try { needsExtract = File.ReadAllText(marker).Trim() != expectedMarker; }
+                catch { needsExtract = true; }
+            }
+
+            if (needsExtract)
+            {
+                Console.Error.WriteLine("dsh: extracting embedded runtime to " + install);
                 try
                 {
                     if (Directory.Exists(install)) Directory.Delete(install, true);
@@ -107,7 +119,7 @@ class DshLauncher
                 string nodeDir = Path.GetDirectoryName(nodeExe);
                 Directory.CreateDirectory(nodeDir);
                 ExtractResource("node.zip", nodeDir);
-                File.WriteAllText(marker, Version + " " + DateTime.UtcNow.ToString("o"));
+                File.WriteAllText(marker, expectedMarker);
                 Console.Error.WriteLine("dsh: extraction complete");
                 // A new payload version extracted: drop stale sibling caches
                 // (best effort — a server still running from one of them keeps
@@ -329,6 +341,14 @@ class DshLauncher
         sb.Append('"');
         sb.Append(value.Replace("\"", "\\\""));
         sb.Append('"');
+    }
+
+    /// Size of one embedded resource; -1 when missing. Used to fingerprint the
+    /// payload so a rebuilt exe re-extracts instead of reusing a stale cache.
+    static long GetResourceSize(string name)
+    {
+        using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
+            return s == null ? -1 : s.Length;
     }
 
     static void ExtractResource(string name, string destDir)

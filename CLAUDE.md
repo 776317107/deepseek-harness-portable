@@ -59,7 +59,7 @@ dsh 原生支持 `DSH_HOME`（优先级：显式路径 > `$DSH_HOME` > `~/.dsh`�
 ## exe 版构建与启动细节
 
 - `build-exe.ps1` 调用 `make-zips.ps1` 打包出 `dsh.zip`（`app\` + `runtime\tools\` + 顶层文件，排除 `*.map` 与 `.cache`）与 `node.zip`（仅 `runtime\node\node.exe`），再用系统自带 .NET Framework `csc.exe` 编译 `launcher.cs` 并把两个 zip 作为托管资源嵌入。
-- `launcher.cs` 里的 `const string Version = "__DSH_VERSION__"` 是模板占位符，`build-exe.ps1` 会替换成已安装 dsh 的实际版本 → 每次重建 exe 解压到新的 `portable\<version>\` 缓存目录，并清理旧缓存。
+- `launcher.cs` 里的 `const string Version = "__DSH_VERSION__"` 是模板占位符，`build-exe.ps1` 会替换成已安装 dsh 的实际版本 → 解压到 `portable\<version>\` 缓存目录；`.extracted.ok` 标记记录内嵌 dsh.zip/node.zip 的资源大小，**同版本重建（载荷变化）也会重新解压**，并清理旧版本缓存。
 - `launcher.cs` 是 UTF-8 源码，`build-exe.ps1` 读取时必须 `Get-Content -Encoding UTF8`（Windows PowerShell 5.1 默认按 ANSI 读无 BOM 的 UTF-8 会乱码，csc 报 CS1010）。源码里可放心写中文，编译后按控制台代码页输出。
 - exe 首次运行把内嵌 zip 解压到 exe 旁的 `portable\<version>\`；该位置只读时回退到 `%LOCALAPPDATA%\dsh-portable-exe\<version>`。`data\` 默认在 exe 旁，用户设置 `DSH_HOME` 环境变量时可覆盖（多实例）。
 - Web 模式（无参/`web`/命令开头的 `--profile web`，由 `IsWebMode()` 判断——`plugin --profile web ...` 等子命令不被误判）先探测默认端口 3080 是否已有 dsh 实例（有则只开浏览器），并用基于 data 目录的命名互斥锁防双实例写坏会话。
