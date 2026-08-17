@@ -11,7 +11,8 @@ rem   dsh plugin --profile web add <package>   install a plugin
 set "APP_DIR=%~dp0"
 if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
 
-set "DSH_HOME=%APP_DIR%\data"
+if not defined DSH_HOME set "DSH_HOME=%APP_DIR%\data"
+if "%DSH_HOME%"=="" set "DSH_HOME=%APP_DIR%\data"
 if not exist "%DSH_HOME%" mkdir "%DSH_HOME%"
 
 set "DSH_AGENTS_HOME=%DSH_HOME%\.agents"

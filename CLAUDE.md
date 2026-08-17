@@ -32,7 +32,7 @@ pwsh -ExecutionPolicy Bypass -File build-all.ps1 -NodeVersion v24.19.0
 | --- | --- |
 | `build-all.ps1` | 唯一的编排脚本：7 步构建/升级流程 |
 | `build\portable\` | 封装源码：`launcher.cs`（exe 启动器）、`build-exe.ps1`、`make-zips.ps1`、`make-icon.ps1`、`app.ico`/`app.manifest` |
-| `build\portable\skeleton\` | 复制进**两种产物**的模板：`*.cmd` 启动器、`upgrade.mjs`、README/使用说明 |
+| `build\portable\skeleton\` | 复制进**两种产物**的模板：`*.cmd` 启动器、`upgrade.mjs`、`实例管理器.cmd`/`instance-manager.mjs`、README/使用说明 |
 | `refs\portable-src\` | 上游 `dsh-portable` 的原始 `launcher.cs`/`build.ps1`（参考，不参与构建） |
 | `deepseek-harness-master\` | DeepSeek Harness 官方源码（vendored 参考，**不修改**，见下） |
 | `dist\` | 构建输出（两种产物） |
@@ -40,14 +40,15 @@ pwsh -ExecutionPolicy Bypass -File build-all.ps1 -NodeVersion v24.19.0
 
 ## 便携化契约（跨文件的核心不变量）
 
-所有用户数据必须落在应用目录内，绝不写系统目录。这条契约由**两处**同时实现，改动时必须保持同步：
+所有用户数据必须落在应用目录内，绝不写系统目录。这条契约由**三处**同时实现（文件夹版 `.cmd`、exe 版 `launcher.cs`、实例管理器 `instance-manager.mjs` 的 `buildEnv()`），改动时必须保持同步：
 
 - 文件夹版：`build\portable\skeleton\Start-DeepSeek-Harness.cmd` 与 `dsh.cmd`
 - exe 版：`build\portable\launcher.cs` 的 `BuildProcess()`（第 241 行起）
+- 实例管理器：`build\portable\skeleton\instance-manager.mjs` 的 `buildEnv()`
 
 共同点：
 
-- `DSH_HOME` → `<应用目录>\data`（settings.yaml、.credentials.yaml、.env、profiles、sessions、attachments 全部在此）
+- `DSH_HOME` 默认 → `<应用目录>\data`（settings.yaml、.credentials.yaml、.env、profiles、sessions、attachments 全部在此）；**用户显式设置 `DSH_HOME` 环境变量时尊重之**（多实例基础）
 - `DSH_AGENTS_HOME` → `<应用目录>\data\.agents`（技能目录）
 - `PNPM_HOME` / `PNPM_STORE_DIR` → `data\` 下（`dsh plugin` 不污染系统目录）
 - `PATH` 前置内嵌 `runtime\node` 与 `runtime\tools\node_modules\.bin`
@@ -60,10 +61,19 @@ dsh 原生支持 `DSH_HOME`（优先级：显式路径 > `$DSH_HOME` > `~/.dsh`�
 - `build-exe.ps1` 调用 `make-zips.ps1` 打包出 `dsh.zip`（`app\` + `runtime\tools\` + 顶层文件，排除 `*.map` 与 `.cache`）与 `node.zip`（仅 `runtime\node\node.exe`），再用系统自带 .NET Framework `csc.exe` 编译 `launcher.cs` 并把两个 zip 作为托管资源嵌入。
 - `launcher.cs` 里的 `const string Version = "__DSH_VERSION__"` 是模板占位符，`build-exe.ps1` 会替换成已安装 dsh 的实际版本 → 每次重建 exe 解压到新的 `portable\<version>\` 缓存目录，并清理旧缓存。
 - `launcher.cs` 是 UTF-8 源码，`build-exe.ps1` 读取时必须 `Get-Content -Encoding UTF8`（Windows PowerShell 5.1 默认按 ANSI 读无 BOM 的 UTF-8 会乱码，csc 报 CS1010）。源码里可放心写中文，编译后按控制台代码页输出。
-- exe 首次运行把内嵌 zip 解压到 exe 旁的 `portable\<version>\`；该位置只读时回退到 `%LOCALAPPDATA%\dsh-portable-exe\<version>`。`data\` 始终在 exe 旁。
+- exe 首次运行把内嵌 zip 解压到 exe 旁的 `portable\<version>\`；该位置只读时回退到 `%LOCALAPPDATA%\dsh-portable-exe\<version>`。`data\` 默认在 exe 旁，用户设置 `DSH_HOME` 环境变量时可覆盖（多实例）。
 - Web 模式（无参/`web`/命令开头的 `--profile web`，由 `IsWebMode()` 判断——`plugin --profile web ...` 等子命令不被误判）先探测默认端口 3080 是否已有 dsh 实例（有则只开浏览器），并用基于 data 目录的命名互斥锁防双实例写坏会话。
 - `plugin` 子命令失败（退出码非 0）时，启动器会打印中文提示：`ERR_PNPM_IGNORED_BUILDS` 时编辑 `data\profiles\web\pnpm-workspace.yaml` 的 `allowBuilds`，缺少 VS 工具链属可选原生模块编译失败。
 - 长路径：`launcher.cs` 用 `AppContext` 开关 + 手动逐条目解压（`ZipFile.ExtractToDirectory` 不感知长路径），因为嵌套 node_modules 会超过 MAX_PATH。
+
+## 实例管理器
+
+- 入口：`实例管理器.cmd`（文件夹版在便携版根；exe 版在 `portable\<version>\`，exe 首次运行解压后才可用）。主体 `instance-manager.mjs` 复用内嵌 node.exe，零额外依赖；支持 `--cli list|start <name>|stop <name>` 一次性命令。
+- 配置存储：`data\instances\instances.json`（实例列表）、`data\instances\<name>.pid`、`<name>.log`。放 `data\` 下所以跨 `build-all.ps1` 重建存活（data\ 自动备份恢复）。
+- 每个实例 = `{ name, dataDir(DSH_HOME，相对 appRoot 存，跨机可移植), port(0=默认 3080), profile(web/headless), task, extraArgs, env, note }`。
+- 启动：spawn 内嵌 node + dsh（不走 exe launcher，避免开浏览器），环境变量同 `BuildProcess()`；web 启动前探测端口冲突、同 dataDir 防并发（管理器自己的防护，exe 的互斥锁只覆盖 exe 启动路径）；PID 写入 pid 文件，停止用 `taskkill /T`。运行状态：web 用端口探测（响应体含 "dsh"/"DeepSeek Harness"），headless 用 PID 存活。
+- 形态检测：脚本同目录存在 `.extracted.ok` = exe 版（appRoot = 上两级 = exe 旁，runtime 在脚本同目录），否则文件夹版（appRoot = 脚本目录）。
+- 不依赖管理器也能直接启动：`dsh.cmd`/exe 都尊重 `DSH_HOME` 环境变量，用户手动 `set DSH_HOME=...` + `--port` 即可与管理器实例并存。
 
 ## 升级路径
 

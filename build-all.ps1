@@ -119,7 +119,7 @@ npm.cmd install --prefix (Join-Path $Portable "runtime\tools") npm@10 --no-audit
 if ($LASTEXITCODE -ne 0) { throw "npm10 install failed" }
 
 Write-Host "== 5/7 copy launchers and docs =="
-foreach ($f in @("Start-DeepSeek-Harness.cmd", "dsh.cmd", "Stop-DeepSeek-Harness.cmd", "README.md", "使用说明.txt", "升级-便携版.cmd", "upgrade.mjs")) {
+foreach ($f in @("Start-DeepSeek-Harness.cmd", "dsh.cmd", "Stop-DeepSeek-Harness.cmd", "README.md", "使用说明.txt", "升级-便携版.cmd", "upgrade.mjs", "实例管理器.cmd", "instance-manager.mjs")) {
     $src = Join-Path $Root "build\portable\skeleton\$f"
     if (Test-Path $src) { Copy-Item $src (Join-Path $Portable $f) -Force }
 }

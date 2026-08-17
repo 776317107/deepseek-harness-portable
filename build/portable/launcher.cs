@@ -58,8 +58,17 @@ class DshLauncher
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             if (string.IsNullOrEmpty(exeDir)) exeDir = Directory.GetCurrentDirectory();
 
-            // ---- data root: always next to the exe ----
+            // ---- data root: DSH_HOME env wins, else <exeDir>\data ----
             string dataRoot = Path.Combine(exeDir, "data");
+            string envHome = Environment.GetEnvironmentVariable("DSH_HOME");
+            if (!string.IsNullOrWhiteSpace(envHome))
+            {
+                // Mirror dsh's resolveDshHome: whitespace-only counts as unset.
+                // Normalize relative values against exeDir (child cwd == exeDir),
+                // keeping the mutex name stable.
+                if (!Path.IsPathRooted(envHome)) envHome = Path.Combine(exeDir, envHome);
+                dataRoot = Path.GetFullPath(envHome);
+            }
             try { Directory.CreateDirectory(dataRoot); }
             catch (Exception ex) { throw new Exception("cannot create data directory " + dataRoot + ": " + ex.Message); }
             string dataReadme = Path.Combine(dataRoot, "README.txt");

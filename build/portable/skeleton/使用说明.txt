@@ -24,6 +24,17 @@ DeepSeek Harness 便携版 - 使用说明
     后重新安装即可；提示缺少 Visual Studio 属可选原生模块编译失败，一般
     不影响使用。
 
+  多实例运行（实例管理器）：
+    双击"实例管理器.cmd"可创建/启动/停止多个实例，每个实例使用独立
+    数据目录(DSH_HOME)与端口。新建时填:实例名、数据目录(默认
+    data\instances\<名>)、模式(web/headless)、端口(web 模式,不同实例
+    填不同端口)、headless 任务等。实例数据各自独立,配置保存在
+    data\instances\instances.json,随文件夹迁移。
+    不用管理器也可直接启动:启动器尊重 DSH_HOME 环境变量,例如
+    set DSH_HOME=D:\dsh-data-2 后 dsh.cmd web --port 3081。
+    注意:同一数据目录不要同时跑两个 web 实例(会写坏会话);第二实例
+    必须显式指定不同 --port。
+
 三、数据都在哪里
   全部数据保存在本文件夹的 data\ 目录：
     data\settings.yaml      设置

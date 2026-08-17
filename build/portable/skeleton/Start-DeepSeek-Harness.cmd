@@ -12,8 +12,9 @@ rem ============================================================
 set "APP_DIR=%~dp0"
 if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
 
-rem ---- user data root: EVERYTHING portable lives under .\data ----
-set "DSH_HOME=%APP_DIR%\data"
+rem ---- user data root: default .\data, overridable via DSH_HOME env ----
+if not defined DSH_HOME set "DSH_HOME=%APP_DIR%\data"
+if "%DSH_HOME%"=="" set "DSH_HOME=%APP_DIR%\data"
 if not exist "%DSH_HOME%" mkdir "%DSH_HOME%"
 
 rem ---- skills home: keep inside the app folder (portable) ----
