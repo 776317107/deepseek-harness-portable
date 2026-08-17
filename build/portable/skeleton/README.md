@@ -28,6 +28,24 @@ dsh.cmd --profile web --help                   :: 查看 Web 参数
 dsh.cmd plugin --profile web add <插件包>      :: 安装插件
 ```
 
+### 安装插件
+
+插件（bundle）是声明了 `dsh.bundle` 的 npm 包，安装到 `data\profiles\<name>\`，随文件夹迁移：
+
+```bat
+dsh.cmd plugin --profile web add <npm包名>         :: 从 npm 安装
+dsh.cmd plugin --profile web add github:xx/yy      :: 从 git 安装
+dsh.cmd plugin --profile web remove <插件包名>     :: 移除
+```
+
+安装完成后**重启 Web UI 生效**。注意 pnpm 10+ 的构建授权机制：
+
+- 插件含原生模块（如 ssh2）时，安装可能提示 `ERR_PNPM_IGNORED_BUILDS`。编辑
+  `data\profiles\web\pnpm-workspace.yaml`，把 `allowBuilds` 下对应包的值改为
+  `true`（授权该包在安装时执行构建脚本），再重新执行安装命令。
+- 提示缺少 Visual Studio 工具链属可选原生模块编译失败（如 ssh2 加密绑定），
+  一般不影响使用。
+
 ---
 
 ## 便携性说明（重要）

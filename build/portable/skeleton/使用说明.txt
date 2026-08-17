@@ -17,6 +17,13 @@ DeepSeek Harness 便携版 - 使用说明
     dsh.cmd --profile headless "问题"         无界面执行一个任务
     dsh.cmd plugin --profile web add <包名>   安装插件
 
+  安装插件：
+    插件是声明了 dsh.bundle 的 npm 包，装到 data\profiles\<name>\，安装后
+    重启 Web UI 生效。若提示 ERR_PNPM_IGNORED_BUILDS，编辑
+    data\profiles\web\pnpm-workspace.yaml，把 allowBuilds 下对应包改为 true
+    后重新安装即可；提示缺少 Visual Studio 属可选原生模块编译失败，一般
+    不影响使用。
+
 三、数据都在哪里
   全部数据保存在本文件夹的 data\ 目录：
     data\settings.yaml      设置

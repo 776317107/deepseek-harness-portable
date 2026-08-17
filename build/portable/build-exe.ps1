@@ -47,7 +47,9 @@ if (-not (Test-Path $dshManifest)) { throw "dsh package manifest not found: $dsh
 $dshVersion = (Get-Content $dshManifest -Raw | ConvertFrom-Json).version
 if (-not $dshVersion) { throw "cannot read dsh version from $dshManifest" }
 $templatedSource = Join-Path $WorkDir "launcher.generated.cs"
-$sourceText = Get-Content $Source -Raw
+# launcher.cs is UTF-8; Windows PowerShell 5.1 would otherwise decode it as
+# the system ANSI codepage and garble any non-ASCII (中文) in the source.
+$sourceText = Get-Content $Source -Raw -Encoding UTF8
 $sourceText = $sourceText -replace '__DSH_VERSION__', $dshVersion
 Set-Content -Path $templatedSource -Value $sourceText -Encoding UTF8
 Write-Host "launcher Version -> $dshVersion"

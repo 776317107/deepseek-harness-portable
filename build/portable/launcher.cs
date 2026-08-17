@@ -118,7 +118,7 @@ class DshLauncher
             if (!File.Exists(entry)) throw new Exception("dsh entry missing after extraction: " + entry);
 
             var passthrough = new List<string>(args);
-            bool webMode = passthrough.Count == 0 || passthrough[0] == "web" || IsProfileWeb(passthrough);
+            bool webMode = IsWebMode(passthrough);
             if (passthrough.Count == 0) passthrough.Add("web");
 
             if (webMode)
@@ -143,7 +143,14 @@ class DshLauncher
                     return RunWeb(entry, nodeExe, passthrough, install, exeDir, dataRoot);
                 }
             }
-            return RunPlain(entry, nodeExe, passthrough, install, exeDir, dataRoot);
+            int exitCode = RunPlain(entry, nodeExe, passthrough, install, exeDir, dataRoot);
+            if (exitCode != 0 && passthrough.Count > 0 && passthrough[0] == "plugin")
+            {
+                Console.Error.WriteLine("dsh: plugin 命令失败。常见原因:");
+                Console.Error.WriteLine("  * pnpm 报 ERR_PNPM_IGNORED_BUILDS → 编辑 data\\profiles\\web\\pnpm-workspace.yaml,把 allowBuilds 下对应包改为 true 后重试");
+                Console.Error.WriteLine("  * 提示缺少 Visual Studio 工具链 → 可选原生模块(ssh2 等)编译失败,一般不影响使用");
+            }
+            return exitCode;
         }
         catch (Exception ex)
         {
@@ -154,11 +161,16 @@ class DshLauncher
         }
     }
 
-    static bool IsProfileWeb(List<string> args)
+    /// Web mode only when the invocation actually boots the web profile:
+    /// no args, `web`, or `--profile web` at the START of the command line.
+    /// A subcommand like `plugin --profile web add <pkg>` must pass through to
+    /// dsh untouched — matching `--profile web` anywhere would hijack it into
+    /// "open the web UI" whenever a server already answers on the port.
+    static bool IsWebMode(List<string> args)
     {
-        for (int i = 0; i < args.Count - 1; i++)
-            if (args[i] == "--profile" && args[i + 1] == "web") return true;
-        return false;
+        if (args.Count == 0) return true;
+        if (args[0] == "web") return true;
+        return args.Count > 1 && args[0] == "--profile" && args[1] == "web";
     }
 
     /// Derive a stable per-data-root mutex name. The path already includes the
