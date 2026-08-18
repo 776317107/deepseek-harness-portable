@@ -123,6 +123,65 @@ async function anyDshRunning() {
   return (await detectDshServices()).length > 0
 }
 
+// ---- 一键启动配置 ----
+const launchConfigFile = join(managerDir, 'launch.json')
+const launchPidFile = join(managerDir, 'launch.pid')
+function defaultLaunchConfig() {
+  return { port: 3080, autoOpenBrowser: true, extraArgs: [] }
+}
+function readLaunchConfig() {
+  try { return { ...defaultLaunchConfig(), ...JSON.parse(readFileSync(launchConfigFile, 'utf8')) } }
+  catch { return defaultLaunchConfig() }
+}
+function writeLaunchConfig(cfg) {
+  mkdirSync(managerDir, { recursive: true })
+  writeFileSync(launchConfigFile, JSON.stringify(cfg, null, 2))
+}
+function launchStatus() {
+  const cfg = readLaunchConfig()
+  const port = Number(cfg.port) || 3080
+  return { cfg, port, running: null }
+}
+async function launchNow() {
+  const cfg = readLaunchConfig()
+  const port = Number(cfg.port) || 3080
+  // 端口已有 dsh 服务:直接开浏览器(或提示)
+  if (await webPortOpen(port)) {
+    return { ok: true, alreadyRunning: true, port, message: `端口 ${port} 已有 dsh 服务在运行` }
+  }
+  // 清理失效 pid 残留
+  try { unlinkSync(launchPidFile) } catch { /* none */ }
+  const args = ['web']
+  if (port > 0) args.push('--port', String(port))
+  if (Array.isArray(cfg.extraArgs)) args.push(...cfg.extraArgs)
+  const launchLog = join(managerDir, 'launch.log')
+  mkdirSync(managerDir, { recursive: true })
+  writeFileSync(launchLog, '', { flag: 'a' })
+  const out = createWriteStream(launchLog, { flags: 'a', encoding: 'utf8' })
+  const child = spawn(nodeExe, [dshBin, ...args], {
+    cwd: appRoot, detached: true, windowsHide: true,
+    env: buildEnv(dataRoot),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout.pipe(out)
+  child.stderr.pipe(out)
+  writeFileSync(launchPidFile, String(child.pid))
+  child.unref()
+  // 等待端口就绪后自动打开浏览器
+  if (cfg.autoOpenBrowser) {
+    ;(async () => {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000))
+        if (await webPortOpen(port)) {
+          spawn('cmd', ['/c', 'start', '', `"http://127.0.0.1:${port}"`], { windowsHide: true }).unref()
+          break
+        }
+      }
+    })()
+  }
+  return { ok: true, pid: child.pid, port, message: `已启动 dsh(端口 ${port}),等待就绪…` }
+}
+
 // ---- 升级(复用 upgrade.mjs 逻辑)----
 function installedVersion() {
   const p = join(runtimeRoot, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
@@ -416,6 +475,35 @@ function startServer() {
       return sendJson(res, 200, { rows: dataUsage() })
     }
 
+    // ---- 一键启动 ----
+    if (p === '/api/launch/status' && method === 'GET') {
+      const cfg = readLaunchConfig()
+      const port = Number(cfg.port) || 3080
+      const running = await webPortOpen(port)
+      const pid = (() => {
+        try { return Number(readFileSync(launchPidFile, 'utf8')) } catch { return 0 }
+      })()
+      return sendJson(res, 200, { cfg, port, running, pid, pidAlive: isPidAlive(pid) })
+    }
+    if (p === '/api/launch/config' && method === 'GET') {
+      return sendJson(res, 200, { cfg: readLaunchConfig() })
+    }
+    if (p === '/api/launch/config' && method === 'PUT') {
+      const body = await readBody(req)
+      const cfg = { ...readLaunchConfig(), ...body }
+      if (!Number.isInteger(Number(cfg.port)) || Number(cfg.port) < 0 || Number(cfg.port) > 65535) {
+        return sendJson(res, 400, { error: '端口须为 0-65535 的数字' })
+      }
+      cfg.port = Number(cfg.port)
+      cfg.autoOpenBrowser = !!cfg.autoOpenBrowser
+      if (!Array.isArray(cfg.extraArgs)) cfg.extraArgs = []
+      writeLaunchConfig(cfg)
+      return sendJson(res, 200, { ok: true, cfg })
+    }
+    if (p === '/api/launch/start' && method === 'POST') {
+      return sendJson(res, 200, await launchNow())
+    }
+
     // 检测运行中的 dsh 服务(如 exe/dsh.cmd 启动的默认实例),可一键停止
     if (p === '/api/detect/services' && method === 'GET') {
       return sendJson(res, 200, { services: await detectDshServices() })
@@ -702,6 +790,12 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
     <div class="cards" id="dash-cards"></div>
     <h3>运行中的 dsh 服务</h3>
     <div id="dash-detect"></div>
+    <h3>一键启动</h3>
+    <div class="row" style="margin-bottom:14px">
+      <button id="launch-btn" style="padding:11px 26px;font-size:15px" onclick="launchStart()">▶ 启动 dsh</button>
+      <button class="ghost" style="padding:11px 14px;font-size:15px" onclick="openLaunchConfig()" title="启动设置">⚙ 设置</button>
+      <span id="launch-state" style="color:var(--dim);font-size:13px"></span>
+    </div>
     <h3>快捷操作</h3>
     <div class="row">
       <button onclick="quickDshWeb()">打开 dsh Web UI</button>
@@ -812,6 +906,56 @@ async function stopDetected(pid, port) {
     alert(r.message)
     refreshDash()
   } catch (e) { alert('停止失败: ' + e.message) }
+}
+// ---- 一键启动 ----
+async function refreshLaunchState() {
+  try {
+    var s = await api('/launch/status')
+    var btn = $('launch-btn')
+    if (s.running) {
+      btn.textContent = '◉ 运行中(打开)'
+      btn.onclick = function () { quickDshWeb() }
+      $('launch-state').textContent = 'dsh 已在端口 ' + s.port + ' 运行'
+    } else {
+      btn.textContent = '▶ 启动 dsh'
+      btn.onclick = function () { launchStart() }
+      $('launch-state').textContent = '端口 ' + s.port + (s.cfg.autoOpenBrowser ? ' · 启动后自动打开浏览器' : ' · 不自动打开浏览器')
+    }
+  } catch (e) { $('launch-state').textContent = '' }
+}
+function launchStart() {
+  post('/launch/start').then(function (r) {
+    if (r.alreadyRunning) {
+      alert('dsh 已在端口 ' + r.port + ' 运行,直接打开浏览器')
+      quickDshWeb()
+    } else {
+      $('launch-state').textContent = r.message
+      setTimeout(refreshLaunchState, 3000)
+    }
+  }).catch(function (e) { alert('启动失败: ' + e.message) })
+}
+async function openLaunchConfig() {
+  var s = await api('/launch/config')
+  var c = s.cfg
+  $('modal').innerHTML =
+    '<h3>启动设置</h3>' +
+    '<label>端口(0-65535,默认 3080)</label><input id="f-lport" value="' + c.port + '">' +
+    '<label style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-lbrowser" style="width:auto"' + (c.autoOpenBrowser ? ' checked' : '') + '> 启动后自动打开浏览器</label>' +
+    '<label>额外 dsh 参数(空格分隔,如 --patch x.yml)</label><input id="f-largs" value="' + (c.extraArgs || []).join(' ') + '">' +
+    '<div class="row" style="margin-top:16px;justify-content:flex-end">' +
+    '<button class="ghost" onclick="closeModal()">取消</button>' +
+    '<button onclick="saveLaunchConfig()">保存</button></div>'
+  $('modal-bg').style.display = 'flex'
+}
+function saveLaunchConfig() {
+  var cfg = {
+    port: parseInt($('f-lport').value || '3080', 10),
+    autoOpenBrowser: $('f-lbrowser').checked,
+    extraArgs: $('f-largs').value.trim() ? $('f-largs').value.trim().split(/\\s+/) : [],
+  }
+  api('/launch/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
+    .then(function () { closeModal(); refreshLaunchState() })
+    .catch(function (e) { alert('保存失败: ' + e.message) })
 }
 async function quickDshWeb() {
   try { var o = await api('/overview'); await post('/quick/dsh-web', { port: 3080 }) }
@@ -987,9 +1131,10 @@ function cleanWebView2() {
 
 // ---- 初始化 ----
 refreshDash()
+refreshLaunchState()
 setInterval(function () {
   var v = document.querySelector('#sidebar nav a.active').getAttribute('data-view')
-  if (v === 'dash') refreshDash()
+  if (v === 'dash') { refreshDash(); refreshLaunchState() }
 }, 5000)
 </script>
 </body>
