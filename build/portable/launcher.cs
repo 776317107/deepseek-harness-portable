@@ -139,6 +139,24 @@ class DshLauncher
             if (!File.Exists(entry)) throw new Exception("dsh entry missing after extraction: " + entry);
 
             var passthrough = new List<string>(args);
+            // `manager` forwards to the bundled Harness Manager desktop shell
+            // (WebView2 window over the local manager server). The shell itself
+            // resolves node/appRoot from its own location, so no args needed.
+            if (passthrough.Count > 0 && passthrough[0] == "manager")
+            {
+                string mgrExe = Path.Combine(install, "HarnessManager.exe");
+                if (!File.Exists(mgrExe)) throw new Exception("HarnessManager.exe missing in this payload: " + mgrExe);
+                try
+                {
+                    var mgrPsi = new ProcessStartInfo(mgrExe) { UseShellExecute = true };
+                    Process.Start(mgrPsi);
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception("failed to start Harness Manager: " + ex.Message);
+                }
+            }
             bool webMode = IsWebMode(passthrough);
             if (passthrough.Count == 0) passthrough.Add("web");
 

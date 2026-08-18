@@ -128,6 +128,9 @@ if ($LASTEXITCODE -ne 0) { throw "pnpm install failed" }
 npm.cmd install --prefix (Join-Path $Portable "runtime\tools") npm@10 --no-audit --no-fund --loglevel=warn
 if ($LASTEXITCODE -ne 0) { throw "npm10 install failed" }
 
+Write-Host "== 4b/7 build Harness Manager desktop shell =="
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Build "portable\build-manager.ps1")
+
 Write-Host "== 5/7 copy launchers and docs =="
 # Enumerate the skeleton dir instead of hard-coding names: Windows
 # PowerShell 5.1 decodes this BOM-less UTF-8 script as ANSI, which garbles

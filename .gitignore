@@ -12,6 +12,12 @@ build/7z2602-extra.7z
 build/data-backup/
 build/portable/work/
 
+# 桌面管理器构建产物(由 build-manager.ps1 生成)与 WebView2 SDK 缓存
+build/portable/skeleton/HarnessManager.exe
+build/portable/skeleton/WebView2Loader.dll
+build/portable/skeleton/Microsoft.Web.WebView2*.dll
+build/portable/webview2/
+
 # 上游官方源码(仅本地参考,不随仓库提交)
 deepseek-harness-master/
 

@@ -32,7 +32,7 @@ pwsh -ExecutionPolicy Bypass -File build-all.ps1 -NodeVersion v24.19.0
 | --- | --- |
 | `build-all.ps1` | 唯一的编排脚本：7 步构建/升级流程 |
 | `build\portable\` | 封装源码：`launcher.cs`（exe 启动器）、`build-exe.ps1`、`make-zips.ps1`、`make-icon.ps1`、`app.ico`/`app.manifest` |
-| `build\portable\skeleton\` | 复制进**两种产物**的模板：`*.cmd` 启动器、`upgrade.mjs`、`实例管理器.cmd`/`instance-manager.mjs`、README/使用说明 |
+| `build\portable\skeleton\` | 复制进**两种产物**的模板：`*.cmd` 启动器、`upgrade.mjs`、`harness-manager.mjs` + `HarnessManager.exe`/`WebView2Loader.dll`（桌面管理器）、README/使用说明 |
 | `refs\portable-src\` | 上游 `dsh-portable` 的原始 `launcher.cs`/`build.ps1`（参考，不参与构建） |
 | `deepseek-harness-master\` | DeepSeek Harness 官方源码（vendored 参考，**不修改**，见下） |
 | `dist\` | 构建输出（两种产物） |
@@ -40,11 +40,11 @@ pwsh -ExecutionPolicy Bypass -File build-all.ps1 -NodeVersion v24.19.0
 
 ## 便携化契约（跨文件的核心不变量）
 
-所有用户数据必须落在应用目录内，绝不写系统目录。这条契约由**三处**同时实现（文件夹版 `.cmd`、exe 版 `launcher.cs`、实例管理器 `instance-manager.mjs` 的 `buildEnv()`），改动时必须保持同步：
+所有用户数据必须落在应用目录内，绝不写系统目录。这条契约由**三处**同时实现（文件夹版 `.cmd`、exe 版 `launcher.cs`、桌面管理器 `harness-manager.mjs` 的 `buildEnv()`），改动时必须保持同步：
 
 - 文件夹版：`build\portable\skeleton\Start-DeepSeek-Harness.cmd` 与 `dsh.cmd`
 - exe 版：`build\portable\launcher.cs` 的 `BuildProcess()`（第 241 行起）
-- 实例管理器：`build\portable\skeleton\instance-manager.mjs` 的 `buildEnv()`
+- 桌面管理器：`build\portable\skeleton\harness-manager.mjs` 的 `buildEnv()`
 
 共同点：
 
@@ -66,13 +66,15 @@ dsh 原生支持 `DSH_HOME`（优先级：显式路径 > `$DSH_HOME` > `~/.dsh`�
 - `plugin` 子命令失败（退出码非 0）时，启动器会打印中文提示：`ERR_PNPM_IGNORED_BUILDS` 时编辑 `data\profiles\web\pnpm-workspace.yaml` 的 `allowBuilds`，缺少 VS 工具链属可选原生模块编译失败。
 - 长路径：`launcher.cs` 用 `AppContext` 开关 + 手动逐条目解压（`ZipFile.ExtractToDirectory` 不感知长路径），因为嵌套 node_modules 会超过 MAX_PATH。
 
-## 实例管理器
+## 桌面管理器（Harness Manager）
 
-- 入口：`实例管理器.cmd`（文件夹版在便携版根；exe 版在 `portable\<version>\`，exe 首次运行解压后才可用）。主体 `instance-manager.mjs` 复用内嵌 node.exe，零额外依赖；支持 `--cli list|start <name>|stop <name>` 一次性命令。
-- 配置存储：`data\instances\instances.json`（实例列表）、`data\instances\<name>.pid`、`<name>.log`。放 `data\` 下所以跨 `build-all.ps1` 重建存活（data\ 自动备份恢复）。
-- 每个实例 = `{ name, dataDir(DSH_HOME，相对 appRoot 存，跨机可移植), port(0=默认 3080), profile(web/headless), task, extraArgs, env, note }`。
-- 启动：spawn 内嵌 node + dsh（不走 exe launcher，避免开浏览器），环境变量同 `BuildProcess()`；web 启动前探测端口冲突、同 dataDir 防并发（管理器自己的防护，exe 的互斥锁只覆盖 exe 启动路径）；PID 写入 pid 文件，停止用 `taskkill /T`。运行状态：web 用端口探测（响应体含 "dsh"/"DeepSeek Harness"），headless 用 PID 存活。
-- 形态检测：脚本同目录存在 `.extracted.ok` = exe 版（appRoot = 上两级 = exe 旁，runtime 在脚本同目录），否则文件夹版（appRoot = 脚本目录）。
+- 入口：`HarnessManager.exe`（WebView2 壳，双击启动原生窗口；`DeepSeek-Harness-Portable.exe manager` 在 exe 版透传启动）。无 WebView2 Runtime 时降级为系统浏览器打开面板（`DSM_NO_WEBVIEW2=1` 可强制测试降级）。
+- 架构：壳（`build\portable\HarnessManager.cs`，WebView2 WinForms）spawn 内嵌 node 跑 `harness-manager.mjs --managed`（本地 http 服务器，默认 3099 端口占用则漂移，仅绑 127.0.0.1），读到 `HARNESS_MANAGER_URL` 行后 WebView2 加载；**WebView2 用户数据目录显式指向 `data\webview2-cache`（便携契约，防写 %LOCALAPPDATA%）**；壳退出 POST `/api/shutdown` 优雅关服务器，fallback taskkill 无 /T（不株连 detached 实例）。
+- `harness-manager.mjs`（单文件零依赖）功能模块：仪表盘、实例管理（原 instance-manager.mjs 逻辑，已并入）、插件管理（dsh plugin add/remove）、升级管理（复用 upgrade.mjs 逻辑，前置检查实例运行中）、数据备份/恢复（纯 JS zip STORE 写入器，`\\?\` 长路径支持；排除 backups/webview2-cache/.npm-cache/.manager）、settings.yaml 读写、实例日志 tail/SSE。
+- 实例配置存储：`data\instances\instances.json`（`{version, instances:[{name, dataDir, port, profile, task, extraArgs, env, note, pid, effPort}]}`）+ `<name>.pid`/`<name>.log`。跨重建存活。
+- 命令行接管旧实例管理器：`node harness-manager.mjs --cli list|start <name>|stop <name>`。
+- 构建：`build\portable\build-manager.ps1`（下载 WebView2 NuGet 缓存到 `build\portable\webview2\`、UTF-8→BOM 后 csc 编译、`WebView2Loader.dll`（x64）与 exe 同目录分发）；`build-all.ps1` 第 4b 步调用，产物暂存 skeleton（第 5 步枚举复制、make-zips 自动入 exe 载荷）。
+- 冲突防护：管理器 3099 与 dsh 3080 分离；壳互斥锁 `Local\dsh-harness-manager-` 与 exe 的 `Local\dsh-portable-exe-` 命名分离；管理器内实例同 dataDir 防并发 + 与默认 data\ 共享时 UI 警告；升级/恢复前置检查实例运行中（409）。残余风险：管理器实例与手动 `exe`/`dsh.cmd` 启动的同 dataDir 实例无法互锁（靠端口探测+文档警告）。
 - 不依赖管理器也能直接启动：`dsh.cmd`/exe 都尊重 `DSH_HOME` 环境变量，用户手动 `set DSH_HOME=...` + `--port` 即可与管理器实例并存。
 
 ## 升级路径
