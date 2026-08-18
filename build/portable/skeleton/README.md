@@ -51,32 +51,17 @@ dsh.cmd plugin --profile web remove <插件包名>     :: 移除
 双击 **`HarnessManager.exe`** 打开桌面管理器（原生窗口，Windows 10/11 自带
 WebView2，无需装任何东西；无 WebView2 时自动降级为浏览器打开）。功能模块：
 
-- **仪表盘**：dsh/Node 版本、data 占用、实例总览、快捷打开 dsh Web UI 与目录。
-- **实例管理**：创建/编辑/启动/停止多个实例，每个实例使用**独立的数据目录
-  （DSH_HOME）**和**独立端口**（web/headless 两种模式，headless 可配任务字符串）；
-  实时状态、日志查看。实例数据在各自的 `data\instances\<名>\` 下互不干扰，
-  配置保存在 `data\instances\instances.json`，随文件夹迁移。
-- **插件管理**：安装/移除 dsh 插件（bundle），带操作输出控制台与常见错误提示。
+- **仪表盘**：dsh/Node 版本、data 占用、运行中的 dsh 服务检测（可一键停止）、
+  快捷打开 dsh Web UI 与目录。
+- **插件管理**：安装/移除/禁用/启用 dsh 插件（bundle），带操作输出控制台
+  与常见错误提示。
 - **升级管理**：检查 npm 最新版、一键升级 dsh（升级只动 `app\`，`data\` 不受影响）。
-- **数据与备份**：一键备份 `data\` 为 zip、恢复备份、编辑 settings.yaml、
-  查看 data 占用明细。
+- **数据与备份**：一键备份 `data\` 为 zip、恢复（合并/彻底两种方式）、
+  删除备份、编辑 settings.yaml、查看 data 占用明细。
 
-不用管理器也能直接启动多实例——启动器尊重 `DSH_HOME` 环境变量：
-
-```bat
-:: 实例 1(默认数据目录)
-dsh.cmd web
-
-:: 实例 2:独立数据目录 + 不同端口
-set DSH_HOME=D:\dsh-data-2
-dsh.cmd web --port 3081
-```
-
-> 注意：同一数据目录不要同时跑两个 web 实例（会写坏会话）；第二实例必须显式指定
-> 不同的 `--port`，否则会直接打开已有实例的页面。exe 版管理器位于
-> `portable\<版本>\`（exe 首次运行解压后出现），也可运行
-> `DeepSeek-Harness-Portable.exe manager` 直接启动。命令行接管：
-> `runtime\node\node.exe harness-manager.mjs --cli list|start <名>|stop <名>`。
+并行任务建议直接在 dsh Web UI 中创建多个会话/Agent 完成,无需多个实例。
+exe 版管理器位于 `portable\<版本>\`（exe 首次运行解压后出现），也可运行
+`DeepSeek-Harness-Portable.exe manager` 直接启动。
 
 ---
 

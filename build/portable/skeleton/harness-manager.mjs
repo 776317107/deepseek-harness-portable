@@ -22,27 +22,12 @@ const exeEdition = existsSync(join(scriptDir, '.extracted.ok'))
 const runtimeRoot = scriptDir
 const appRoot = exeEdition ? dirname(dirname(scriptDir)) : scriptDir
 const dataRoot = join(appRoot, 'data')
-const instancesDir = join(dataRoot, 'instances')
-const configFile = join(instancesDir, 'instances.json')
 const backupsDir = join(dataRoot, 'backups')
 const managerDir = join(dataRoot, '.manager')
 const nodeExe = join(runtimeRoot, 'runtime', 'node', 'node.exe')
 const dshBin = join(runtimeRoot, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const upgradeScript = join(runtimeRoot, 'upgrade.mjs')
 const settingsFile = join(dataRoot, 'settings.yaml')
-
-// ---- 配置 ----
-function loadConfig() {
-  if (!existsSync(configFile)) return { version: 1, instances: [] }
-  try { return JSON.parse(readFileSync(configFile, 'utf8')) }
-  catch { return { version: 1, instances: [] } }
-}
-function saveConfig(cfg) {
-  mkdirSync(instancesDir, { recursive: true })
-  writeFileSync(configFile, JSON.stringify(cfg, null, 2))
-}
-function pidPath(name) { return join(instancesDir, name + '.pid') }
-function logPath(name) { return join(instancesDir, name + '.log') }
 
 // ---- 工具 ----
 function isPidAlive(pid) {
@@ -60,16 +45,7 @@ function webPortOpen(port) {
     req.on('timeout', () => { req.destroy(); resolveOk(false) })
   })
 }
-function resolveDataDir(v) {
-  if (!v) return join(appRoot, 'data')
-  return isAbsolute(v) ? normalize(v) : resolve(appRoot, v)
-}
-function showDataDir(abs) {
-  const rel = relative(appRoot, abs)
-  if (rel && !rel.startsWith('..')) return rel
-  return abs
-}
-function buildEnv(absData, inst) {
+function buildEnv(absData) {
   const env = { ...process.env }
   env.DSH_HOME = absData
   env.DSH_AGENTS_HOME = join(absData, '.agents')
@@ -81,20 +57,7 @@ function buildEnv(absData, inst) {
     env.PATH || '',
   ].join(';')
   if (!process.env.DSH_TELEMETRY_DISABLED) env.DSH_TELEMETRY_DISABLED = '1'
-  if (inst.env && typeof inst.env === 'object') Object.assign(env, inst.env)
   return env
-}
-function findExistingDataDirs() {
-  const dirs = new Set()
-  if (existsSync(join(dataRoot, 'settings.yaml'))) dirs.add('data')
-  if (existsSync(instancesDir)) {
-    for (const d of readdirSync(instancesDir, { withFileTypes: true })) {
-      if (d.isDirectory() && existsSync(join(instancesDir, d.name, 'settings.yaml'))) {
-        dirs.add(join('data', 'instances', d.name))
-      }
-    }
-  }
-  return [...dirs]
 }
 function dirSize(root, exclude) {
   let total = 0
@@ -134,12 +97,7 @@ function detectRunningServices() {
     }
   }
   for (let port = 3080; port <= 3095; port++) {
-    if (listening.has(port)) {
-      const pid = listening.get(port)
-      // 跳过管理器自己创建的实例(它们有 pid 文件且由管理器管理)
-      const managed = loadConfig().instances.some((i) => i.pid === pid)
-      if (!managed) out.push({ port, pid })
-    }
+    if (listening.has(port)) out.push({ port, pid: listening.get(port) })
   }
   return out
 }
@@ -160,123 +118,9 @@ function stopServiceByPid(pid) {
   }
   return ok
 }
-
-// ---- 状态检测 ----
-async function statusOf(inst) {
-  if (inst.profile === 'web') {
-    const port = inst.effPort || inst.port || 0
-    if (port > 0) {
-      if (await webPortOpen(port)) return 'running'
-      return isPidAlive(inst.pid) ? 'starting' : 'stopped'
-    }
-    return isPidAlive(inst.pid) ? 'starting' : 'stopped'
-  }
-  return isPidAlive(inst.pid) ? 'running' : 'finished'
-}
-function sweepStale(cfg) {
-  let changed = false
-  for (const inst of cfg.instances) {
-    if (existsSync(pidPath(inst.name)) && !isPidAlive(inst.pid)) {
-      try { unlinkSync(pidPath(inst.name)) } catch { /* ignore */ }
-      inst.pid = 0
-      changed = true
-    }
-  }
-  if (changed) saveConfig(cfg)
-}
-async function runningInstances(cfg) {
-  const out = []
-  for (const inst of cfg.instances) {
-    const st = await statusOf(inst)
-    if (st === 'running' || st === 'starting') out.push(inst.name)
-  }
-  return out
-}
-
-// ---- 实例启停(同旧实例管理器语义)----
-async function startInstance(cfg, inst) {
-  if (inst.profile === 'web') {
-    const port = inst.port || 0
-    if (port > 0 && await webPortOpen(port)) {
-      return { ok: false, error: `拒绝启动:端口 ${port} 已有 dsh 服务在运行(可能是别的实例)` }
-    }
-  }
-  const absData = resolveDataDir(inst.dataDir)
-  for (const other of cfg.instances) {
-    if (other.name === inst.name) continue
-    if (resolveDataDir(other.dataDir).toLowerCase() !== absData.toLowerCase()) continue
-    const st = await statusOf(other)
-    if (st === 'running' || st === 'starting') {
-      return { ok: false, error: `拒绝启动:数据目录 ${showDataDir(absData)} 已被实例 ${other.name} 使用(同目录双实例会写坏会话)` }
-    }
-  }
-  mkdirSync(absData, { recursive: true })
-  const args = []
-  if (inst.profile === 'web') {
-    args.push('web')
-    if (inst.port > 0) args.push('--port', String(inst.port))
-  } else {
-    if (!inst.task) return { ok: false, error: 'headless 实例缺少任务字符串(task)' }
-    args.push('--profile', 'headless', inst.task)
-  }
-  if (Array.isArray(inst.extraArgs)) args.push(...inst.extraArgs)
-  mkdirSync(instancesDir, { recursive: true })
-  writeFileSync(logPath(inst.name), '', { flag: 'a' })
-  const out = createWriteStream(logPath(inst.name), { flags: 'a', encoding: 'utf8' })
-  const child = spawn(nodeExe, [dshBin, ...args], {
-    cwd: appRoot, detached: true, windowsHide: true,
-    env: buildEnv(absData, inst),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  child.stdout.pipe(out)
-  child.stderr.pipe(out)
-  inst.pid = child.pid
-  inst.effPort = inst.port || 3080
-  writeFileSync(pidPath(inst.name), String(child.pid))
-  saveConfig(cfg)
-  child.on('exit', () => {
-    try { unlinkSync(pidPath(inst.name)) } catch { /* ignore */ }
-    inst.pid = 0
-    saveConfig(cfg)
-  })
-  child.unref()
-  if (inst.profile === 'web' && !inst.port) {
-    let buf = ''
-    child.stdout.on('data', (chunk) => {
-      buf += chunk.toString()
-      const m = buf.match(/http:\/\/127\.0\.0\.1:(\d+)/)
-      if (m) { inst.effPort = Number(m[1]); saveConfig(cfg) }
-    })
-  }
-  let warn = ''
-  if (inst.profile === 'web' && resolveDataDir(inst.dataDir).toLowerCase() === dataRoot.toLowerCase()) {
-    warn = '该实例与默认实例共享数据目录,如已用 exe/dsh.cmd 启动同目录实例请勿再启动'
-  }
-  return {
-    ok: true, pid: child.pid, port: inst.effPort,
-    warn,
-    message: `已启动 ${inst.name}(PID ${child.pid},${inst.profile === 'web' ? `端口 ${inst.effPort}` : 'headless'})`,
-  }
-}
-function stopInstance(cfg, inst) {
-  let stopped = false
-  if (inst.pid > 0 && isPidAlive(inst.pid)) {
-    try {
-      const r = spawnSync('taskkill', ['/PID', String(inst.pid), '/T', '/F'], { stdio: 'ignore', shell: true })
-      stopped = r.status === 0
-    } catch { stopped = false }
-  }
-  try { unlinkSync(pidPath(inst.name)) } catch { /* ignore */ }
-  inst.pid = 0
-  inst.effPort = inst.port || 3080
-  saveConfig(cfg)
-  return { ok: true, message: stopped ? `已停止 ${inst.name}` : `实例 ${inst.name} 未在运行` }
-}
-function removeInstance(cfg, inst) {
-  stopInstance(cfg, inst)
-  cfg.instances = cfg.instances.filter((i) => i.name !== inst.name)
-  saveConfig(cfg)
-  return { ok: true, message: `已删除实例 ${inst.name}(数据目录保留在磁盘上)` }
+// 升级/恢复等危险操作前:有 dsh 服务在运行则拒绝
+async function anyDshRunning() {
+  return (await detectDshServices()).length > 0
 }
 
 // ---- 升级(复用 upgrade.mjs 逻辑)----
@@ -317,7 +161,7 @@ function parsePluginList(text) {
 }
 function listPlugins(profile) {
   const r = spawnSync(nodeExe, [dshBin, 'plugin', '--profile', profile, 'list'], {
-    cwd: appRoot, encoding: 'utf8', timeout: 120000, env: buildEnv(dataRoot, { env: {} }),
+    cwd: appRoot, encoding: 'utf8', timeout: 120000, env: buildEnv(dataRoot),
   })
   if (r.status !== 0) throw new Error((r.stderr || r.stdout || '').split('\n').slice(-5).join('\n') || 'plugin list 失败')
   return parsePluginList(r.stdout)
@@ -394,7 +238,6 @@ function createBackup(note) {
       const abs = join(dir, e.name)
       const relPath = rel ? rel + '/' + e.name : e.name
       if (BACKUP_EXCLUDE.some((x) => e.name === x)) continue
-      if (rel === 'instances' && (e.name.endsWith('.log') || e.name.endsWith('.pid'))) continue
       if (e.isDirectory()) walk(abs, relPath)
       else files.push({ abs, relPath })
     }
@@ -491,7 +334,7 @@ function writeSettings(content) {
 }
 
 // ---- 概览 ----
-function overview(cfg) {
+function overview() {
   return {
     edition: exeEdition ? 'exe' : 'folder',
     appRoot,
@@ -500,9 +343,7 @@ function overview(cfg) {
     nodeVersion: (() => {
       try { return spawnSync(nodeExe, ['--version'], { encoding: 'utf8' }).stdout.trim() } catch { return '?' }
     })(),
-    instances: cfg.instances.length,
     dataSize: fmtSize(dirSize(dataRoot, BACKUP_EXCLUDE)),
-    dataDirs: findExistingDataDirs(),
   }
 }
 function dataUsage() {
@@ -515,36 +356,6 @@ function dataUsage() {
   }
   rows.sort((a, b) => b.size - a.size)
   return rows
-}
-
-// ---- 入口 CLI ----
-async function runCli(argv) {
-  const cfg = loadConfig()
-  sweepStale(cfg)
-  const [cmd, name] = argv
-  if (cmd === 'list') {
-    for (const inst of cfg.instances) {
-      const st = await statusOf(inst)
-      const port = inst.profile === 'web' ? (inst.effPort || inst.port || 3080) : '-'
-      console.log(`${inst.name}\t${st}\t${port}\t${inst.profile}\t${showDataDir(resolveDataDir(inst.dataDir))}`)
-    }
-    process.exit(0)
-  } else if (cmd === 'start' && name) {
-    const inst = cfg.instances.find((i) => i.name === name)
-    if (!inst) { console.log(`未找到实例 ${name}`); process.exit(1) }
-    const r = await startInstance(cfg, inst)
-    console.log(r.ok ? r.message : `错误: ${r.error}`)
-    if (r.warn) console.log(`警告: ${r.warn}`)
-    process.exit(r.ok ? 0 : 1)
-  } else if (cmd === 'stop' && name) {
-    const inst = cfg.instances.find((i) => i.name === name)
-    if (!inst) { console.log(`未找到实例 ${name}`); process.exit(1) }
-    console.log(stopInstance(cfg, inst).message)
-    process.exit(0)
-  } else {
-    console.log('用法: --cli list | start <name> | stop <name>')
-    process.exit(2)
-  }
 }
 
 // ---- HTTP 服务器 ----
@@ -566,18 +377,6 @@ function sendJson(res, code, obj) {
   })
   res.end(body)
 }
-const NAME_RE = /^[\w\u4e00-\u9fa5-]+$/
-function validateInstance(inst) {
-  if (!inst.name || !NAME_RE.test(inst.name)) return '名称仅允许中文、字母、数字、下划线、连字符(不含空格/路径字符)'
-  if (inst.profile !== 'web' && inst.profile !== 'headless') return 'profile 必须为 web 或 headless'
-  if (inst.profile === 'web') {
-    const p = Number(inst.port ?? 3080)
-    if (!Number.isInteger(p) || p < 0 || p > 65535) return '端口须为 0-65535 的数字'
-  }
-  if (inst.profile === 'headless' && !inst.task) return 'headless 实例必须填写任务字符串'
-  return null
-}
-
 function startServer() {
   // Origin 防护:仅本机
   const originOk = (req) => {
@@ -604,8 +403,6 @@ function startServer() {
   })
 
   const apiRoute = async (req, res, url) => {
-    const cfg = loadConfig()
-    sweepStale(cfg)
     const p = url.pathname
     const method = req.method
 
@@ -613,58 +410,13 @@ function startServer() {
       return sendJson(res, 200, { ok: true, pid: process.pid, dsh: installedVersion() })
     }
     if (p === '/api/overview' && method === 'GET') {
-      return sendJson(res, 200, overview(cfg))
+      return sendJson(res, 200, overview())
     }
     if (p === '/api/data/usage' && method === 'GET') {
       return sendJson(res, 200, { rows: dataUsage() })
     }
 
-    // ---- 实例 ----
-    if (p === '/api/instances' && method === 'GET') {
-      const rows = []
-      for (const inst of cfg.instances) {
-        rows.push({ ...inst, status: await statusOf(inst), dataDirAbs: resolveDataDir(inst.dataDir) })
-      }
-      return sendJson(res, 200, { instances: rows, existingDataDirs: findExistingDataDirs() })
-    }
-    if (p === '/api/instances' && method === 'POST') {
-      const body = await readBody(req)
-      const err = validateInstance(body)
-      if (err) return sendJson(res, 400, { error: err })
-      if (cfg.instances.some((i) => i.name === body.name)) return sendJson(res, 400, { error: '该名称已存在' })
-      const inst = {
-        name: body.name, dataDir: body.dataDir || `data/instances/${body.name}`,
-        port: Number(body.port ?? 3080), profile: body.profile,
-        task: body.task || '', extraArgs: Array.isArray(body.extraArgs) ? body.extraArgs : [],
-        env: body.env || {}, note: body.note || '', pid: 0, effPort: Number(body.port ?? 3080),
-      }
-      cfg.instances.push(inst)
-      saveConfig(cfg)
-      if (body.inheritFromDefault) {
-        // 从默认 data 复制插件配置(profiles 含已装插件)与 settings,
-        // 让新实例直接继承默认实例的插件与基础设置
-        try {
-          const abs = resolveDataDir(inst.dataDir)
-          mkdirSync(abs, { recursive: true })
-          const copyDir = (src, dst) => {
-            if (!existsSync(src)) return
-            mkdirSync(dst, { recursive: true })
-            for (const e of readdirSync(src, { withFileTypes: true })) {
-              const s = join(src, e.name)
-              const d = join(dst, e.name)
-              if (e.isDirectory()) copyDir(s, d)
-              else { try { copyFileSync(s, d) } catch { /* locked */ } }
-            }
-          }
-          copyDir(join(dataRoot, 'profiles'), join(abs, 'profiles'))
-          if (existsSync(settingsFile)) copyFileSync(settingsFile, join(abs, 'settings.yaml'))
-        } catch (e) {
-          return sendJson(res, 200, { ok: true, instance: inst, warn: '继承默认配置失败(部分复制): ' + e.message })
-        }
-      }
-      return sendJson(res, 200, { ok: true, instance: inst })
-    }
-    // 检测非管理器启动的 dsh 服务(手动 exe/dsh.cmd 启动的实例)
+    // 检测运行中的 dsh 服务(如 exe/dsh.cmd 启动的默认实例),可一键停止
     if (p === '/api/detect/services' && method === 'GET') {
       return sendJson(res, 200, { services: await detectDshServices() })
     }
@@ -674,50 +426,6 @@ function startServer() {
       if (!pid) return sendJson(res, 400, { error: '缺少 pid' })
       const ok = stopServiceByPid(pid)
       return sendJson(res, 200, { ok, message: ok ? `已停止端口 ${body.port ?? ''} 上的服务` : '进程已不存在或无法停止' })
-    }
-    const instMatch = p.match(/^\/api\/instances\/([^/]+)$/)
-    if (instMatch) {
-      const name = decodeURIComponent(instMatch[1])
-      const inst = cfg.instances.find((i) => i.name === name)
-      if (!inst) return sendJson(res, 404, { error: '实例不存在' })
-      if (method === 'PUT') {
-        const body = await readBody(req)
-        const err = validateInstance(body)
-        if (err) return sendJson(res, 400, { error: err })
-        Object.assign(inst, {
-          dataDir: body.dataDir ?? inst.dataDir, port: Number(body.port ?? inst.port ?? 3080),
-          profile: body.profile ?? inst.profile, task: body.task ?? inst.task ?? '',
-          extraArgs: Array.isArray(body.extraArgs) ? body.extraArgs : inst.extraArgs,
-          env: body.env ?? inst.env ?? {}, note: body.note ?? inst.note ?? '',
-          effPort: Number(body.port ?? inst.effPort ?? 3080),
-        })
-        saveConfig(cfg)
-        return sendJson(res, 200, { ok: true, instance: inst })
-      }
-      if (method === 'DELETE') {
-        return sendJson(res, 200, removeInstance(cfg, inst))
-      }
-    }
-    const instAct = p.match(/^\/api\/instances\/([^/]+)\/(start|stop)$/)
-    if (instAct && method === 'POST') {
-      const name = decodeURIComponent(instAct[1])
-      const inst = cfg.instances.find((i) => i.name === name)
-      if (!inst) return sendJson(res, 404, { error: '实例不存在' })
-      if (instAct[2] === 'start') return sendJson(res, 200, await startInstance(cfg, inst))
-      return sendJson(res, 200, stopInstance(cfg, inst))
-    }
-    if (p === '/api/instances/log' && method === 'GET') {
-      const name = url.searchParams.get('name')
-      const tail = Number(url.searchParams.get('tail') || 100)
-      const lp = logPath(name || '')
-      if (!existsSync(lp)) return sendJson(res, 200, { lines: [] })
-      const text = readFileSync(lp, 'utf8')
-      const lines = text.split(/\r?\n/).filter(Boolean).slice(-tail)
-      return sendJson(res, 200, { lines })
-    }
-    if (p === '/api/log/stream' && method === 'GET') {
-      const name = url.searchParams.get('name')
-      return sseLog(res, name)
     }
 
     // ---- 插件 ----
@@ -738,13 +446,13 @@ function startServer() {
       const body = await readBody(req)
       const profile = body.profile || 'web'
       if (!body.name) return sendJson(res, 400, { error: '缺少插件名' })
-      startOp('plugin', nodeExe, [dshBin, 'plugin', '--profile', profile, 'add', body.name], buildEnv(dataRoot, { env: {} }))
+      startOp("plugin", nodeExe, [dshBin, "plugin", "--profile", profile, "add", body.name], buildEnv(dataRoot))
       return sendJson(res, 200, { ok: true })
     }
     if (p === '/api/plugins/remove' && method === 'POST') {
       const body = await readBody(req)
       const profile = body.profile || 'web'
-      startOp('plugin', nodeExe, [dshBin, 'plugin', '--profile', profile, 'remove', body.name], buildEnv(dataRoot, { env: {} }))
+      startOp("plugin", nodeExe, [dshBin, "plugin", "--profile", profile, "remove", body.name], buildEnv(dataRoot))
       return sendJson(res, 200, { ok: true })
     }
     // 禁用/启用:改 profile 的 dsh.profile.bundles(保留 dependencies,
@@ -784,10 +492,9 @@ function startServer() {
       } catch (e) { return sendJson(res, 500, { error: e.message }) }
     }
     if (p === '/api/upgrade' && method === 'POST') {
-      const running = await runningInstances(cfg)
-      if (running.length) return sendJson(res, 409, { error: `有实例正在运行(${running.join(', ')}),请先停止再升级(升级会重装 app\\node_modules)` })
+      if (await anyDshRunning()) return sendJson(res, 409, { error: '有 dsh 服务正在运行,请先停止再升级(升级会重装 app\\node_modules)' })
       if (!existsSync(upgradeScript)) return sendJson(res, 500, { error: 'upgrade.mjs 不存在' })
-      startOp('upgrade', nodeExe, [upgradeScript, '--yes'], buildEnv(dataRoot, { env: {} }))
+      startOp("upgrade", nodeExe, [upgradeScript, "--yes"], buildEnv(dataRoot))
       return sendJson(res, 200, { ok: true })
     }
 
@@ -810,8 +517,7 @@ function startServer() {
     }
     if (p === '/api/backups/restore' && method === 'POST') {
       const body = await readBody(req)
-      const running = await runningInstances(cfg)
-      if (running.length) return sendJson(res, 409, { error: `有实例正在运行(${running.join(', ')}),请先全部停止再恢复` })
+      if (await anyDshRunning()) return sendJson(res, 409, { error: '有 dsh 服务正在运行,请先全部停止再恢复' })
       let snapshot = null
       if (body.mode === 'clean') {
         // 彻底恢复:先自动快照当前 data(留后路),再清空(保留 backups;
@@ -873,30 +579,6 @@ function startServer() {
     return sendJson(res, 404, { error: 'not found' })
   }
 
-  // SSE:实例日志 tail -f
-  function sseLog(res, name) {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    })
-    const lp = logPath(name || '')
-    let lastSize = existsSync(lp) ? statSync(lp).size : 0
-    const timer = setInterval(() => {
-      try {
-        const size = statSync(lp).size
-        if (size > lastSize) {
-          const fd = readFileSync(lp, 'utf8')
-          const chunk = fd.slice(lastSize)
-          lastSize = size
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-        } else {
-          res.write(': hb\n\n')
-        }
-      } catch { res.write(': hb\n\n') }
-    }, 1500)
-    reqCleanup(res, () => clearInterval(timer))
-  }
   // SSE:操作输出(插件/升级)
   function sseOps(res) {
     res.writeHead(200, {
@@ -1008,7 +690,6 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
   <div class="brand">Harness 管理器<small id="brand-sub">DeepSeek Harness</small></div>
   <nav>
     <a data-view="dash" class="active" onclick="showView('dash')">▦ 仪表盘</a>
-    <a data-view="inst" onclick="showView('inst')">◉ 实例管理</a>
     <a data-view="plug" onclick="showView('plug')">⬡ 插件管理</a>
     <a data-view="upgr" onclick="showView('upgr')">↻ 升级管理</a>
     <a data-view="data" onclick="showView('data')">▤ 数据与备份</a>
@@ -1019,9 +700,7 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
   <div id="view-dash">
     <h2>仪表盘</h2>
     <div class="cards" id="dash-cards"></div>
-    <h3>实例总览</h3>
-    <div id="dash-inst"></div>
-    <h3>检测到的运行中服务(非管理器启动)</h3>
+    <h3>运行中的 dsh 服务</h3>
     <div id="dash-detect"></div>
     <h3>快捷操作</h3>
     <div class="row">
@@ -1029,16 +708,6 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
       <button class="ghost" onclick="quickExplore('data')">打开 data 目录</button>
       <button class="ghost" onclick="quickExplore('.')">打开应用目录</button>
     </div>
-  </div>
-  <div id="view-inst" style="display:none">
-    <h2>实例管理</h2>
-    <div class="row" style="margin-bottom:12px">
-      <button onclick="openInstModal()">＋ 新建实例</button>
-      <span class="grow"></span>
-      <button class="ghost sm" onclick="refreshInstances()">刷新</button>
-    </div>
-    <div id="inst-msg"></div>
-    <table><thead><tr><th>状态</th><th>名称</th><th>模式</th><th>端口</th><th>数据目录</th><th>备注</th><th style="width:220px">操作</th></tr></thead><tbody id="inst-tbody"></tbody></table>
   </div>
   <div id="view-plug" style="display:none">
     <h2>插件管理</h2>
@@ -1090,27 +759,17 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
     </div>
   </div>
 </div>
-<div id="log-drawer">
-  <div class="head">
-    <b id="log-title">日志</b>
-    <span class="grow"></span>
-    <label style="margin:0"><input type="checkbox" id="log-live" checked onchange="toggleLive()" style="width:auto"> 实时</label>
-    <button class="ghost sm" onclick="closeLog()">关闭</button>
-  </div>
-  <pre id="log-body"></pre>
-</div>
 <div id="modal-bg"><div id="modal"></div></div>
 <script>
-var V = { instances: [], refreshTimer: null, logTimer: null, logName: null, es: null, upgrLatest: null, upgrInstalled: null }
+var V = { es: null, upgrLatest: null, upgrInstalled: null, backups: [] }
 function $(id) { return document.getElementById(id) }
 function msg(el, type, text) { el.className = 'msg ' + type; el.textContent = text }
 function showView(name) {
-  var views = ['dash', 'inst', 'plug', 'upgr', 'data']
+  var views = ['dash', 'plug', 'upgr', 'data']
   views.forEach(function (v) { $('view-' + v).style.display = v === name ? '' : 'none' })
   var links = document.querySelectorAll('#sidebar nav a')
   links.forEach(function (a) { a.className = a.getAttribute('data-view') === name ? 'active' : '' })
   if (name === 'dash') refreshDash()
-  if (name === 'inst') refreshInstances()
   if (name === 'plug') refreshPlugins()
   if (name === 'upgr') { upgradeCheck() }
   if (name === 'data') refreshData()
@@ -1122,8 +781,6 @@ async function api(path, opts) {
   return j
 }
 function post(path, body) { return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }) }
-function statusDot(st) { return '<span class="dot ' + st + '"></span>' + ({ running: '运行中', starting: '启动中', stopped: '已停止', finished: '已结束' }[st] || st) }
-
 // ---- 仪表盘 ----
 async function refreshDash() {
   try {
@@ -1134,25 +791,17 @@ async function refreshDash() {
       '<div class="card"><div class="label">dsh 版本</div><div class="value">' + o.dshVersion + '</div></div>' +
       '<div class="card"><div class="label">Node.js(内嵌)</div><div class="value">' + o.nodeVersion + '</div></div>' +
       '<div class="card"><div class="label">形态</div><div class="value">' + (o.edition === 'exe' ? '单文件 exe' : '文件夹') + '</div><div class="sub">' + o.appRoot + '</div></div>' +
-      '<div class="card"><div class="label">data 占用</div><div class="value">' + o.dataSize + '</div><div class="sub">实例数 ' + o.instances + '</div></div>'
-    var insts = await api('/instances')
-    V.instances = insts.instances
-    var rows = insts.instances.map(function (i) {
-      return '<tr><td>' + statusDot(i.status) + '</td><td>' + i.name + '</td><td>' + i.profile + '</td><td>' + (i.profile === 'web' ? (i.effPort || i.port || 3080) : '-') + '</td><td>' + i.dataDir + '</td></tr>'
-    }).join('')
-    $('dash-inst').innerHTML = insts.instances.length
-      ? '<table><thead><tr><th>状态</th><th>名称</th><th>模式</th><th>端口</th><th>数据目录</th></tr></thead><tbody>' + rows + '</tbody></table>'
-      : '<div style="color:var(--dim)">还没有实例,到「实例管理」页新建。</div>'
-    // 检测非管理器启动的 dsh 服务
+      '<div class="card"><div class="label">data 占用</div><div class="value">' + o.dataSize + '</div></div>'
+    // 检测运行中的 dsh 服务(如 exe / dsh.cmd 启动的默认实例)
     var svc = await api('/detect/services')
     if (svc.services.length) {
       $('dash-detect').innerHTML = '<table><thead><tr><th>端口</th><th>PID</th><th style="width:120px">操作</th></tr></thead><tbody>' +
         svc.services.map(function (s) {
           return '<tr><td>' + s.port + '</td><td>' + s.pid + '</td><td><button class="sm danger" onclick="stopDetected(' + s.pid + ',' + s.port + ')">停止</button></td></tr>'
         }).join('') + '</tbody></table>' +
-        '<div style="color:var(--dim);font-size:12px;margin-top:6px">这些是直接用 exe / dsh.cmd 启动的实例(不在管理器列表里)。如需停止,点「停止」。</div>'
+        '<div style="color:var(--dim);font-size:12px;margin-top:6px">这些是直接用 exe / dsh.cmd 启动的 dsh 服务。如需停止,点「停止」。</div>'
     } else {
-      $('dash-detect').innerHTML = '<div style="color:var(--dim)">(未检测到;用 exe / dsh.cmd 直接启动的实例会显示在这里)</div>'
+      $('dash-detect').innerHTML = '<div style="color:var(--dim)">(未检测到运行中的 dsh 服务)</div>'
     }
   } catch (e) { $('foot-info').textContent = '错误: ' + e.message }
 }
@@ -1172,125 +821,7 @@ async function quickExplore(p) {
   try { await post('/quick/explore', { path: p }) } catch (e) { alert('打开失败: ' + e.message) }
 }
 
-// ---- 实例 ----
-async function refreshInstances() {
-  try {
-    var r = await api('/instances')
-    V.instances = r.instances
-    V.existingDirs = r.existingDataDirs
-    $('inst-tbody').innerHTML = r.instances.map(function (i) {
-      return '<tr><td>' + statusDot(i.status) + '</td><td>' + i.name + '</td><td>' + i.profile + '</td><td>' +
-        (i.profile === 'web' ? (i.effPort || i.port || 3080) : '-') + '</td><td>' + i.dataDir + '</td><td>' + (i.note || '') + '</td><td>' +
-        '<button class="sm" onclick="instStart(\\'' + i.name + '\\')">启动</button> ' +
-        '<button class="sm ghost" onclick="instStop(\\'' + i.name + '\\')">停止</button> ' +
-        '<button class="sm ghost" onclick="instLog(\\'' + i.name + '\\')">日志</button> ' +
-        '<button class="sm ghost" onclick="openInstModal(\\'' + i.name + '\\')">编辑</button> ' +
-        '<button class="sm danger" onclick="instDel(\\'' + i.name + '\\')">删除</button></td></tr>'
-    }).join('') || '<tr><td colspan="7" style="color:var(--dim)">(无实例)</td></tr>'
-  } catch (e) { msg($('inst-msg'), 'err', e.message) }
-}
-function instAct(name, act) {
-  return post('/instances/' + encodeURIComponent(name) + '/' + act).then(function (r) {
-    msg($('inst-msg'), r.ok ? 'ok' : 'err', r.message || r.error)
-    if (r.warn) msg($('inst-msg'), 'warn', '警告: ' + r.warn)
-    refreshInstances()
-  }).catch(function (e) { msg($('inst-msg'), 'err', e.message) })
-}
-function instStart(n) { instAct(n, 'start') }
-function instStop(n) { instAct(n, 'stop') }
-function instDel(n) {
-  if (!confirm('删除实例 ' + n + '?(数据目录保留在磁盘上)')) return
-  api('/instances/' + encodeURIComponent(n), { method: 'DELETE' }).then(function (r) {
-    msg($('inst-msg'), 'ok', r.message); refreshInstances()
-  }).catch(function (e) { msg($('inst-msg'), 'err', e.message) })
-}
-function openInstModal(name) {
-  var cur = name ? V.instances.find(function (i) { return i.name === name }) : null
-  var dirs = (V.existingDirs || []).map(function (d) { return '<option value="' + d + '">' + d + '</option>' }).join('')
-  var opts = ['web', 'headless'].map(function (p) { return '<option value="' + p + '"' + (cur && cur.profile === p || !cur && p === 'web' ? ' selected' : '') + '>' + p + '</option>' }).join('')
-  $('modal').innerHTML =
-    '<h3>' + (cur ? '编辑实例 ' + cur.name : '新建实例') + '</h3>' +
-    (cur ? '' : '<label>名称(必填,唯一)</label><input id="f-name" value="">') +
-    '<label>数据目录(DSH_HOME,相对应用目录;已有目录可下拉选择)</label>' +
-    '<input id="f-data" list="f-dirs" value="' + (cur ? cur.dataDir : '') + '" placeholder="data/instances/名称">' +
-    '<datalist id="f-dirs">' + dirs + '</datalist>' +
-    (cur ? '' : '<label style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-inherit" style="width:auto" checked> 复制默认实例的插件配置(profiles 与 settings.yaml,含已装插件)</label>') +
-    '<label>模式</label><select id="f-profile">' + opts + '</select>' +
-    '<label>端口(web 模式;0=默认 3080)</label><input id="f-port" value="' + (cur ? (cur.port || 3080) : '3080') + '">' +
-    '<label>headless 任务</label><input id="f-task" value="' + (cur ? (cur.task || '') : '') + '">' +
-    '<label>额外参数(空格分隔)</label><input id="f-args" value="' + (cur ? (cur.extraArgs || []).join(' ') : '') + '">' +
-    '<label>实例环境变量(KEY=VALUE,逗号分隔)</label><input id="f-env" value="' + (cur && cur.env ? Object.keys(cur.env).map(function (k) { return k + '=' + cur.env[k] }).join(',') : '') + '">' +
-    '<label>备注</label><input id="f-note" value="' + (cur ? (cur.note || '') : '') + '">' +
-    '<div class="row" style="margin-top:16px;justify-content:flex-end">' +
-    '<button class="ghost" onclick="closeModal()">取消</button>' +
-    '<button onclick="saveInst(\\'' + (cur ? cur.name : '') + '\\')">保存</button></div>'
-  $('modal-bg').style.display = 'flex'
-}
 function closeModal() { $('modal-bg').style.display = 'none' }
-function saveInst(oldName) {
-  var body = {
-    name: oldName || $('f-name').value.trim(),
-    dataDir: $('f-data').value.trim() || undefined,
-    profile: $('f-profile').value,
-    port: parseInt($('f-port').value || '3080', 10),
-    task: $('f-task').value.trim(),
-    extraArgs: $('f-args').value.trim() ? $('f-args').value.trim().split(/\\s+/) : [],
-    env: parseEnv($('f-env').value),
-    note: $('f-note').value.trim(),
-  }
-  if (!oldName && !body.name) { alert('请填写名称'); return }
-  if (!oldName) body.inheritFromDefault = !!$('f-inherit').checked
-  var p = oldName
-    ? api('/instances/' + encodeURIComponent(oldName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    : post('/instances', body)
-  p.then(function () { closeModal(); refreshInstances(); msg($('inst-msg'), 'ok', '已保存') })
-    .catch(function (e) { alert(e.message) })
-}
-function parseEnv(s) {
-  var env = {}
-  s.split(',').forEach(function (kv) {
-    var i = kv.indexOf('=')
-    if (i > 0) env[kv.slice(0, i).trim()] = kv.slice(i + 1).trim()
-  })
-  return env
-}
-function instLog(name) {
-  V.logName = name
-  $('log-title').textContent = '日志: ' + name
-  $('log-drawer').style.display = 'flex'
-  $('log-body').textContent = '(加载中…)'
-  fetchLogTail()
-  if (V.logTimer) clearInterval(V.logTimer)
-  V.logTimer = setInterval(fetchLogTail, 2000)
-  toggleLive()
-}
-async function fetchLogTail() {
-  try {
-    var r = await api('/instances/log?name=' + encodeURIComponent(V.logName || '') + '&tail=200')
-    $('log-body').textContent = r.lines.join('\\n')
-    if ($('log-live').checked) $('log-body').scrollTop = $('log-body').scrollHeight
-  } catch (e) { /* ignore */ }
-}
-function toggleLive() {
-  if (!V.logName) return
-  if (V.es) { V.es.close(); V.es = null }
-  if ($('log-live').checked) {
-    V.es = new EventSource('/api/log/stream?name=' + encodeURIComponent(V.logName))
-    V.es.onmessage = function (ev) {
-      var d = JSON.parse(ev.data)
-      if (typeof d === 'string' && d) {
-        $('log-body').textContent += d
-        $('log-body').scrollTop = $('log-body').scrollHeight
-      }
-    }
-  }
-}
-function closeLog() {
-  $('log-drawer').style.display = 'none'
-  if (V.logTimer) clearInterval(V.logTimer)
-  if (V.es) { V.es.close(); V.es = null }
-  V.logName = null
-}
 
 // ---- 插件 ----
 async function refreshPlugins() {
@@ -1363,7 +894,7 @@ function upgradeGo() {
     msg($('upgr-msg'), 'warn', '升级进行中,请勿关闭窗口…')
   }).catch(function (e) {
     msg($('upgr-msg'), 'err', e.message)
-    if (e.message.indexOf('正在运行') >= 0) refreshInstances()
+    if (e.message.indexOf('正在运行') >= 0) refreshDash()
   })
 }
 
@@ -1457,16 +988,12 @@ function cleanWebView2() {
 // ---- 初始化 ----
 refreshDash()
 setInterval(function () {
-  if (['dash', 'inst'].indexOf(document.querySelector('#sidebar nav a.active').getAttribute('data-view')) >= 0) refreshInstances()
-}, 4000)
+  var v = document.querySelector('#sidebar nav a.active').getAttribute('data-view')
+  if (v === 'dash') refreshDash()
+}, 5000)
 </script>
 </body>
 </html>`
 
 // ---- 入口 ----
-const args = process.argv.slice(2)
-if (args[0] === '--cli') {
-  await runCli(args.slice(1))
-} else {
-  startServer()
-}
+startServer()

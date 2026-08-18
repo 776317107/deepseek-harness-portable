@@ -27,15 +27,11 @@ DeepSeek Harness 便携版 - 使用说明
   桌面管理器（HarnessManager.exe）：
     双击 HarnessManager.exe 打开桌面管理器(原生窗口,Win10/11 自带
     WebView2;无 WebView2 时自动用浏览器打开)。功能:仪表盘(版本/data
-    占用/快捷启动)、实例管理(多实例,各自独立数据目录+端口,web/
-    headless 模式)、插件管理(安装/移除 bundle)、升级管理(检查并一键
-    升级 dsh,只动 app\,data\ 不受影响)、数据与备份(data\ 一键打包
-    zip/恢复/settings.yaml 编辑)。
-    实例配置保存在 data\instances\instances.json,随文件夹迁移。
-    不用管理器也可直接启动:启动器尊重 DSH_HOME 环境变量,例如
-    set DSH_HOME=D:\dsh-data-2 后 dsh.cmd web --port 3081。
-    注意:同一数据目录不要同时跑两个 web 实例(会写坏会话);第二实例
-    必须显式指定不同 --port。
+    占用/运行中服务检测与停止/快捷启动)、插件管理(安装/移除/禁用/
+    启用 bundle)、升级管理(检查并一键升级 dsh,只动 app\,data\ 不受
+    影响)、数据与备份(data\ 一键打包 zip,恢复分合并/彻底两种,可
+    删除备份,settings.yaml 编辑)。
+    并行任务建议直接在 dsh Web UI 中创建多个会话/Agent,无需多实例。
 
 三、数据都在哪里
   全部数据保存在本文件夹的 data\ 目录：
