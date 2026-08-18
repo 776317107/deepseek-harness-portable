@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync,
   unlinkSync, createWriteStream, statSync, rmSync, openSync, writeSync, closeSync,
+  copyFileSync,
 } from 'node:fs'
 import { join, dirname, resolve, isAbsolute, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -116,6 +117,48 @@ function fmtSize(n) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
   if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB'
   return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+}
+
+// ---- 检测非管理器启动的 dsh 服务(如手动 exe/dsh.cmd 启动的默认实例)----
+function detectRunningServices() {
+  const out = []
+  let netstat
+  try { netstat = spawnSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 15000 }).stdout } catch { return out }
+  const listening = new Map()
+  for (const line of String(netstat).split(/\r?\n/)) {
+    const m = line.match(/TCP\s+127\.0\.0\.1:(\d+)\s+.*LISTENING\s+(\d+)/)
+    if (m) {
+      const port = Number(m[1])
+      const pid = Number(m[2])
+      if (!listening.has(port)) listening.set(port, pid)
+    }
+  }
+  for (let port = 3080; port <= 3095; port++) {
+    if (listening.has(port)) {
+      const pid = listening.get(port)
+      // 跳过管理器自己创建的实例(它们有 pid 文件且由管理器管理)
+      const managed = loadConfig().instances.some((i) => i.pid === pid)
+      if (!managed) out.push({ port, pid })
+    }
+  }
+  return out
+}
+async function detectDshServices() {
+  const found = []
+  for (const s of detectRunningServices()) {
+    if (await webPortOpen(s.port)) found.push(s)
+  }
+  return found
+}
+function stopServiceByPid(pid) {
+  let ok = false
+  if (isPidAlive(pid)) {
+    try {
+      const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', shell: true })
+      ok = r.status === 0
+    } catch { ok = false }
+  }
+  return ok
 }
 
 // ---- 状态检测 ----
@@ -597,7 +640,40 @@ function startServer() {
       }
       cfg.instances.push(inst)
       saveConfig(cfg)
+      if (body.inheritFromDefault) {
+        // 从默认 data 复制插件配置(profiles 含已装插件)与 settings,
+        // 让新实例直接继承默认实例的插件与基础设置
+        try {
+          const abs = resolveDataDir(inst.dataDir)
+          mkdirSync(abs, { recursive: true })
+          const copyDir = (src, dst) => {
+            if (!existsSync(src)) return
+            mkdirSync(dst, { recursive: true })
+            for (const e of readdirSync(src, { withFileTypes: true })) {
+              const s = join(src, e.name)
+              const d = join(dst, e.name)
+              if (e.isDirectory()) copyDir(s, d)
+              else { try { copyFileSync(s, d) } catch { /* locked */ } }
+            }
+          }
+          copyDir(join(dataRoot, 'profiles'), join(abs, 'profiles'))
+          if (existsSync(settingsFile)) copyFileSync(settingsFile, join(abs, 'settings.yaml'))
+        } catch (e) {
+          return sendJson(res, 200, { ok: true, instance: inst, warn: '继承默认配置失败(部分复制): ' + e.message })
+        }
+      }
       return sendJson(res, 200, { ok: true, instance: inst })
+    }
+    // 检测非管理器启动的 dsh 服务(手动 exe/dsh.cmd 启动的实例)
+    if (p === '/api/detect/services' && method === 'GET') {
+      return sendJson(res, 200, { services: await detectDshServices() })
+    }
+    if (p === '/api/detect/stop' && method === 'POST') {
+      const body = await readBody(req)
+      const pid = Number(body.pid)
+      if (!pid) return sendJson(res, 400, { error: '缺少 pid' })
+      const ok = stopServiceByPid(pid)
+      return sendJson(res, 200, { ok, message: ok ? `已停止端口 ${body.port ?? ''} 上的服务` : '进程已不存在或无法停止' })
     }
     const instMatch = p.match(/^\/api\/instances\/([^/]+)$/)
     if (instMatch) {
@@ -647,8 +723,16 @@ function startServer() {
     // ---- 插件 ----
     if (p === '/api/plugins' && method === 'GET') {
       const profile = url.searchParams.get('profile') || 'web'
-      try { return sendJson(res, 200, { plugins: listPlugins(profile) }) }
-      catch (e) { return sendJson(res, 500, { error: e.message }) }
+      try {
+        const plugins = listPlugins(profile)
+        // 补充启用状态:bundles 里有 = 启用
+        try {
+          const pkg = JSON.parse(readFileSync(join(dataRoot, 'profiles', profile, 'package.json'), 'utf8'))
+          const bundles = pkg.dsh?.profile?.bundles ?? []
+          for (const pl of plugins) pl.enabled = bundles.includes(pl.name)
+        } catch { for (const pl of plugins) pl.enabled = true }
+        return sendJson(res, 200, { plugins })
+      } catch (e) { return sendJson(res, 500, { error: e.message }) }
     }
     if (p === '/api/plugins' && method === 'POST') {
       const body = await readBody(req)
@@ -662,6 +746,30 @@ function startServer() {
       const profile = body.profile || 'web'
       startOp('plugin', nodeExe, [dshBin, 'plugin', '--profile', profile, 'remove', body.name], buildEnv(dataRoot, { env: {} }))
       return sendJson(res, 200, { ok: true })
+    }
+    // 禁用/启用:改 profile 的 dsh.profile.bundles(保留 dependencies,
+    // 重新启用不需要重新安装)
+    if (p === '/api/plugins/state' && method === 'POST') {
+      const body = await readBody(req)
+      const profile = body.profile || 'web'
+      const pkgFile = join(dataRoot, 'profiles', profile, 'package.json')
+      if (!existsSync(pkgFile)) return sendJson(res, 404, { error: `profile ${profile} 不存在` })
+      let pkg
+      try { pkg = JSON.parse(readFileSync(pkgFile, 'utf8')) } catch { return sendJson(res, 500, { error: '无法解析 package.json' }) }
+      const bundles = pkg.dsh?.profile?.bundles ?? []
+      const enabled = !!body.enabled
+      const name = body.name
+      if (!name) return sendJson(res, 400, { error: '缺少插件名' })
+      if (enabled && !bundles.includes(name)) {
+        bundles.push(name)
+      } else if (!enabled && bundles.includes(name)) {
+        pkg.dsh.profile.bundles = bundles.filter((b) => b !== name)
+      } else {
+        return sendJson(res, 200, { ok: true, message: '无需变更' })
+      }
+      if (enabled && pkg.dsh.profile.bundles !== bundles) pkg.dsh.profile.bundles = bundles
+      writeFileSync(pkgFile, JSON.stringify(pkg, null, 2))
+      return sendJson(res, 200, { ok: true, message: enabled ? `已启用 ${name}(重启后生效)` : `已禁用 ${name}(重启后生效)` })
     }
     if (p === '/api/ops/stream' && method === 'GET') {
       return sseOps(res)
@@ -691,6 +799,14 @@ function startServer() {
       const body = await readBody(req)
       const r = createBackup(body.note || '')
       return sendJson(res, 200, { ok: true, ...r })
+    }
+    if (p === '/api/backups/delete' && method === 'POST') {
+      const body = await readBody(req)
+      const zipPath = join(backupsDir, basename(body.file || ''))
+      if (!existsSync(zipPath)) return sendJson(res, 404, { error: '备份不存在' })
+      try { unlinkSync(zipPath) } catch (e) { return sendJson(res, 500, { error: '删除失败: ' + e.message }) }
+      try { unlinkSync(zipPath.replace(/\.zip$/, '.txt')) } catch { /* note 文件可有可无 */ }
+      return sendJson(res, 200, { ok: true, message: '已删除备份 ' + body.file })
     }
     if (p === '/api/backups/restore' && method === 'POST') {
       const body = await readBody(req)
@@ -724,7 +840,7 @@ function startServer() {
     if (p === '/api/quick/dsh-web' && method === 'POST') {
       const body = await readBody(req)
       const port = body.port || 3080
-      spawn('cmd', ['/c', 'start', '', `http://127.0.0.1:${port}`], { shell: true, windowsHide: true }).unref()
+      spawn('cmd', ['/c', 'start', '', `"http://127.0.0.1:${port}"`], { windowsHide: true }).unref()
       return sendJson(res, 200, { ok: true })
     }
     if (p === '/api/quick/explore' && method === 'POST') {
@@ -732,7 +848,9 @@ function startServer() {
       const target = resolve(appRoot, body.path || 'data')
       // 白名单:只允许打开 appRoot 内的目录
       if (!target.startsWith(resolve(appRoot))) return sendJson(res, 400, { error: '路径越界' })
-      spawn('explorer', [target], { windowsHide: true }).unref()
+      // explorer.exe 已运行时新进程会把参数丢给旧实例(参数被吞),
+      // 用 cmd /c start 最可靠
+      spawn('cmd', ['/c', 'start', '', `"${target}"`], { windowsHide: true }).unref()
       return sendJson(res, 200, { ok: true })
     }
 
@@ -903,6 +1021,8 @@ label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
     <div class="cards" id="dash-cards"></div>
     <h3>实例总览</h3>
     <div id="dash-inst"></div>
+    <h3>检测到的运行中服务(非管理器启动)</h3>
+    <div id="dash-detect"></div>
     <h3>快捷操作</h3>
     <div class="row">
       <button onclick="quickDshWeb()">打开 dsh Web UI</button>
@@ -1023,7 +1143,26 @@ async function refreshDash() {
     $('dash-inst').innerHTML = insts.instances.length
       ? '<table><thead><tr><th>状态</th><th>名称</th><th>模式</th><th>端口</th><th>数据目录</th></tr></thead><tbody>' + rows + '</tbody></table>'
       : '<div style="color:var(--dim)">还没有实例,到「实例管理」页新建。</div>'
+    // 检测非管理器启动的 dsh 服务
+    var svc = await api('/detect/services')
+    if (svc.services.length) {
+      $('dash-detect').innerHTML = '<table><thead><tr><th>端口</th><th>PID</th><th style="width:120px">操作</th></tr></thead><tbody>' +
+        svc.services.map(function (s) {
+          return '<tr><td>' + s.port + '</td><td>' + s.pid + '</td><td><button class="sm danger" onclick="stopDetected(' + s.pid + ',' + s.port + ')">停止</button></td></tr>'
+        }).join('') + '</tbody></table>' +
+        '<div style="color:var(--dim);font-size:12px;margin-top:6px">这些是直接用 exe / dsh.cmd 启动的实例(不在管理器列表里)。如需停止,点「停止」。</div>'
+    } else {
+      $('dash-detect').innerHTML = '<div style="color:var(--dim)">(未检测到;用 exe / dsh.cmd 直接启动的实例会显示在这里)</div>'
+    }
   } catch (e) { $('foot-info').textContent = '错误: ' + e.message }
+}
+async function stopDetected(pid, port) {
+  if (!confirm('停止端口 ' + port + ' 上运行中的 dsh 服务?')) return
+  try {
+    var r = await post('/detect/stop', { pid: pid, port: port })
+    alert(r.message)
+    refreshDash()
+  } catch (e) { alert('停止失败: ' + e.message) }
 }
 async function quickDshWeb() {
   try { var o = await api('/overview'); await post('/quick/dsh-web', { port: 3080 }) }
@@ -1075,6 +1214,7 @@ function openInstModal(name) {
     '<label>数据目录(DSH_HOME,相对应用目录;已有目录可下拉选择)</label>' +
     '<input id="f-data" list="f-dirs" value="' + (cur ? cur.dataDir : '') + '" placeholder="data/instances/名称">' +
     '<datalist id="f-dirs">' + dirs + '</datalist>' +
+    (cur ? '' : '<label style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-inherit" style="width:auto" checked> 复制默认实例的插件配置(profiles 与 settings.yaml,含已装插件)</label>') +
     '<label>模式</label><select id="f-profile">' + opts + '</select>' +
     '<label>端口(web 模式;0=默认 3080)</label><input id="f-port" value="' + (cur ? (cur.port || 3080) : '3080') + '">' +
     '<label>headless 任务</label><input id="f-task" value="' + (cur ? (cur.task || '') : '') + '">' +
@@ -1099,6 +1239,7 @@ function saveInst(oldName) {
     note: $('f-note').value.trim(),
   }
   if (!oldName && !body.name) { alert('请填写名称'); return }
+  if (!oldName) body.inheritFromDefault = !!$('f-inherit').checked
   var p = oldName
     ? api('/instances/' + encodeURIComponent(oldName), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     : post('/instances', body)
@@ -1157,9 +1298,19 @@ async function refreshPlugins() {
     var profile = $('plug-profile').value
     var r = await api('/plugins?profile=' + profile)
     $('plug-tbody').innerHTML = r.plugins.map(function (p) {
-      return '<tr><td>' + p.name + '</td><td>' + p.version + '</td><td><button class="sm danger" onclick="pluginRemove(\\'' + p.name + '\\')">移除</button></td></tr>'
+      var stateBtn = p.enabled
+        ? '<button class="sm ghost" onclick="pluginState(\\'' + p.name + '\\',false)">禁用</button>'
+        : '<button class="sm" onclick="pluginState(\\'' + p.name + '\\',true)">启用</button>'
+      return '<tr><td>' + p.name + (p.enabled ? '' : ' <span class="badge">已禁用</span>') + '</td><td>' + p.version + '</td><td style="width:180px">' +
+        stateBtn + ' <button class="sm danger" onclick="pluginRemove(\\'' + p.name + '\\')">移除</button></td></tr>'
     }).join('') || '<tr><td colspan="3" style="color:var(--dim)">(无插件)</td></tr>'
   } catch (e) { msg($('plug-msg'), 'err', e.message) }
+}
+function pluginState(name, enabled) {
+  post('/plugins/state', { name: name, enabled: enabled, profile: $('plug-profile').value }).then(function (r) {
+    msg($('plug-msg'), 'ok', r.message)
+    refreshPlugins()
+  }).catch(function (e) { msg($('plug-msg'), 'err', e.message) })
 }
 function pluginAdd() {
   var name = $('plug-add').value.trim()
@@ -1237,9 +1388,17 @@ async function refreshData() {
     V.backups = b.backups
     $('backup-tbody').innerHTML = b.backups.map(function (x) {
       return '<tr><td>' + x.file + '</td><td>' + x.sizeText + '</td><td>' + new Date(x.time).toLocaleString() + '</td><td>' + (x.note || '') + '</td>' +
-        '<td><button class="sm danger" onclick="backupRestore(\\'' + x.file + '\\')">恢复…</button></td></tr>'
+        '<td style="width:170px"><button class="sm" onclick="backupRestore(\\'' + x.file + '\\')">恢复…</button> ' +
+        '<button class="sm danger" onclick="backupDelete(\\'' + x.file + '\\')">删除</button></td></tr>'
     }).join('') || '<tr><td colspan="5" style="color:var(--dim)">(还没有备份,先点「立即备份 data」创建一个)</td></tr>'
   } catch (e) { msg($('data-msg'), 'err', e.message) }
+}
+function backupDelete(file) {
+  if (!confirm('删除备份 ' + file + '?此操作不可恢复。')) return
+  post('/backups/delete', { file: file }).then(function (r) {
+    msg($('data-msg'), 'ok', r.message)
+    refreshData()
+  }).catch(function (e) { msg($('data-msg'), 'err', e.message) })
 }
 function backupNow() {
   msg($('data-msg'), 'warn', '备份生成中,请稍候…')
