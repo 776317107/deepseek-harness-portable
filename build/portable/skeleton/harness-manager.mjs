@@ -696,8 +696,18 @@ function startServer() {
       const body = await readBody(req)
       const running = await runningInstances(cfg)
       if (running.length) return sendJson(res, 409, { error: `有实例正在运行(${running.join(', ')}),请先全部停止再恢复` })
+      let snapshot = null
+      if (body.mode === 'clean') {
+        // 彻底恢复:先自动快照当前 data(留后路),再清空(保留 backups;
+        // webview2-cache/.manager 若被壳锁定则删除失败,跳过即可)
+        snapshot = createBackup('恢复前自动快照').file
+        for (const e of readdirSync(dataRoot, { withFileTypes: true })) {
+          if (e.name === 'backups') continue
+          try { rmSync(join(dataRoot, e.name), { recursive: true, force: true }) } catch { /* locked: skip */ }
+        }
+      }
       const r = restoreBackup(body.file)
-      return sendJson(res, 200, { ok: true, ...r })
+      return sendJson(res, 200, { ok: true, snapshot, ...r })
     }
 
     // ---- settings ----
@@ -1224,10 +1234,11 @@ async function refreshData() {
       return '<tr><td>' + r.name + (r.isDir ? '/' : '') + '</td><td>' + r.sizeText + '</td></tr>'
     }).join('')
     var b = await api('/backups')
+    V.backups = b.backups
     $('backup-tbody').innerHTML = b.backups.map(function (x) {
       return '<tr><td>' + x.file + '</td><td>' + x.sizeText + '</td><td>' + new Date(x.time).toLocaleString() + '</td><td>' + (x.note || '') + '</td>' +
-        '<td><button class="sm danger" onclick="backupRestore(\\'' + x.file + '\\')">恢复</button></td></tr>'
-    }).join('') || '<tr><td colspan="5" style="color:var(--dim)">(无备份)</td></tr>'
+        '<td><button class="sm danger" onclick="backupRestore(\\'' + x.file + '\\')">恢复…</button></td></tr>'
+    }).join('') || '<tr><td colspan="5" style="color:var(--dim)">(还没有备份,先点「立即备份 data」创建一个)</td></tr>'
   } catch (e) { msg($('data-msg'), 'err', e.message) }
 }
 function backupNow() {
@@ -1239,9 +1250,31 @@ function backupNow() {
   }).catch(function (e) { msg($('data-msg'), 'err', e.message) })
 }
 function backupRestore(file) {
-  if (!confirm('恢复备份 ' + file + '?将覆盖 data\\ 下同名文件,且要求所有实例已停止。')) return
-  post('/backups/restore', { file: file }).then(function (r) {
-    msg($('data-msg'), 'ok', '恢复完成: ' + r.count + ' 个文件')
+  var b = (V.backups || []).find(function (x) { return x.file === file })
+  $('modal').innerHTML =
+    '<h3>恢复备份</h3>' +
+    '<p style="margin:8px 0;color:var(--dim);font-size:13px">' +
+    '文件: ' + file + '<br>时间: ' + (b ? new Date(b.time).toLocaleString() : '-') +
+    '<br>大小: ' + (b ? b.sizeText : '-') + (b && b.note ? '<br>备注: ' + b.note : '') + '</p>' +
+    '<label>恢复方式</label>' +
+    '<select id="f-mode">' +
+    '<option value="merge">合并恢复:覆盖 data\\ 下同名文件,保留其余内容</option>' +
+    '<option value="clean">彻底恢复:先自动快照当前 data(留后路),再清空 data 后完整恢复</option>' +
+    '</select>' +
+    '<div class="banner" style="margin-top:12px">恢复要求所有实例已停止;正在运行的实例会拒绝恢复。</div>' +
+    '<div class="row" style="margin-top:14px;justify-content:flex-end">' +
+    '<button class="ghost" onclick="closeModal()">取消</button>' +
+    '<button class="danger" onclick="doRestore(\\'' + file + '\\')">确认恢复</button></div>'
+  $('modal-bg').style.display = 'flex'
+}
+function doRestore(file) {
+  var mode = $('f-mode').value
+  closeModal()
+  msg($('data-msg'), 'warn', '恢复中,请稍候…')
+  post('/backups/restore', { file: file, mode: mode }).then(function (r) {
+    var extra = r.snapshot ? ',当前 data 已自动快照为 ' + r.snapshot : ''
+    msg($('data-msg'), 'ok', '恢复完成: ' + r.count + ' 个文件' + extra)
+    refreshData()
   }).catch(function (e) { msg($('data-msg'), 'err', e.message) })
 }
 async function loadSettings() {
