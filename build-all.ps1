@@ -24,6 +24,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Long-path aware tree delete: installed plugins leave deeply nested
+# node_modules under data\ that exceed MAX_PATH; Remove-Item (PS 5.1)
+# cannot handle them, so fall back to \\?\ + Directory.Delete.
+function Remove-Tree($Path) {
+    try { [System.IO.Directory]::Delete("\\?\$($Path.TrimEnd('\'))", $true) }
+    catch { if (Test-Path $Path) { Remove-Item -Recurse -Force $Path } }
+}
+
 $Root = $PSScriptRoot
 $Dist = Join-Path $Root "dist"
 $Portable = Join-Path $Dist "DeepSeek-Harness-Portable"
@@ -56,8 +65,9 @@ $PortableExists = Test-Path $Portable
 $DataBackup = Join-Path $Build "data-backup"
 if ($PortableExists -and (Test-Path (Join-Path $Portable "data"))) {
     Write-Host "== preserving data\ (user data is kept) =="
-    if (Test-Path $DataBackup) { Remove-Item -Recurse -Force $DataBackup }
-    Copy-Item -Recurse (Join-Path $Portable "data") $DataBackup
+    if (Test-Path $DataBackup) { Remove-Tree $DataBackup }
+    robocopy (Join-Path $Portable "data") $DataBackup /E /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy backup of data\ failed" }
 }
 
 Write-Host "== 1/7 download Node.js runtime ($NodeVersion) =="
@@ -65,7 +75,7 @@ $nodeZip = Join-Path $Build "node-$NodeVersion-win-x64.zip"
 if (-not (Test-Path $nodeZip)) {
     Invoke-Node "const {writeFileSync}=require('fs');const u='$NodeMirror/$NodeVersion/node-$NodeVersion-win-x64.zip';const f='$($nodeZip.Replace('\','/'))';fetch(u).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);writeFileSync(f,Buffer.from(await r.arrayBuffer()));console.error('downloaded node zip')}).catch(e=>{console.error('ERR',e.message);process.exit(1)})"
 }
-if (Test-Path $Portable) { Remove-Item -Recurse -Force $Portable }
+if (Test-Path $Portable) { Remove-Tree $Portable }
 New-Item -ItemType Directory -Force -Path (Join-Path $Portable "runtime\node") | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::ExtractToDirectory($nodeZip, $Build)
@@ -119,16 +129,19 @@ npm.cmd install --prefix (Join-Path $Portable "runtime\tools") npm@10 --no-audit
 if ($LASTEXITCODE -ne 0) { throw "npm10 install failed" }
 
 Write-Host "== 5/7 copy launchers and docs =="
-foreach ($f in @("Start-DeepSeek-Harness.cmd", "dsh.cmd", "Stop-DeepSeek-Harness.cmd", "README.md", "使用说明.txt", "升级-便携版.cmd", "upgrade.mjs", "实例管理器.cmd", "instance-manager.mjs")) {
-    $src = Join-Path $Root "build\portable\skeleton\$f"
-    if (Test-Path $src) { Copy-Item $src (Join-Path $Portable $f) -Force }
+# Enumerate the skeleton dir instead of hard-coding names: Windows
+# PowerShell 5.1 decodes this BOM-less UTF-8 script as ANSI, which garbles
+# the Chinese filenames in a literal list and silently skips them.
+Get-ChildItem -File (Join-Path $Root "build\portable\skeleton") | ForEach-Object {
+    Copy-Item $_.FullName (Join-Path $Portable $_.Name) -Force
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $Portable "data") | Out-Null
 
 Write-Host "== 6/7 restore user data =="
 if (Test-Path $DataBackup) {
-    Copy-Item -Recurse -Force (Join-Path $DataBackup "*") (Join-Path $Portable "data")
-    Remove-Item -Recurse -Force $DataBackup
+    robocopy $DataBackup (Join-Path $Portable "data") /E /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy restore of data\ failed" }
+    Remove-Tree $DataBackup
 }
 
 Write-Host "== 7/7 build single-file exe =="

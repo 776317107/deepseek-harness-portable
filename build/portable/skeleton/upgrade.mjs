@@ -139,4 +139,6 @@ function doUpgrade() {
 
   console.log('提示：单文件 exe 版内嵌的是旧版载荷，需用 build-all.ps1 重新构建后才能一并升级。')
   console.log('你的配置、会话、技能均未改动（data\\ 目录原样保留）。')
+  // 显式退出:stdin 的 data 监听会让事件循环挂着,进程不退出会占用 runtime\node\node.exe
+  process.exit(0)
 }
