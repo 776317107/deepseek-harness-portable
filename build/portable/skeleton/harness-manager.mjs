@@ -685,9 +685,9 @@ function startServer() {
       const target = resolve(appRoot, body.path || 'data')
       // 白名单:只允许打开 appRoot 内的目录
       if (!target.startsWith(resolve(appRoot))) return sendJson(res, 400, { error: '路径越界' })
-      // explorer 直接接收路径(Node 为含空格参数加引号,explorer 原生处理
-      // 多实例 IPC),比 cmd /c start 可靠
-      spawn('explorer', [target], { windowsHide: true }).unref()
+      // 与 dsh-web 同款 ShellExecute 机制:spawn('explorer') 走 explorer 单实例
+      // IPC,繁忙时命令被吞(表现为没反应);cmd start 用 ShellExecute 直接打开
+      exec(`start "" "${target}"`, { windowsHide: true }).unref()
       return sendJson(res, 200, { ok: true })
     }
 
