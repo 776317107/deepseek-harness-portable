@@ -427,6 +427,37 @@ function dataUsage() {
   return rows
 }
 
+// ---- 日志与系统健康 ----
+function managerLog(message) {
+  try {
+    const dir = join(dataRoot, '.manager')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'manager.log'),
+      new Date().toISOString().replace('T', ' ').slice(0, 19) + ' ' + message + '\r\n',
+      { flag: 'a' })
+  } catch { /* 日志失败不阻断 */ }
+}
+
+/// explorer /factory 僵尸进程 PID 集。Windows 11 已知 bug:IFileDialog 等 Shell
+/// COM 调用激活的 explorer.exe /factory,{75dff2b7...} -Embedding 进程在调用方
+/// 释放后不退出,反复调用(如文件夹选择框)会堆积几十个、占数 GB 内存,并拖垮
+/// ShellExecute 打开目录的通道(表现为程序调用无反应,手动双击正常)。
+function explorerFactoryPids() {
+  try {
+    const r = spawnSync('powershell.exe',
+      ['-NoProfile', '-Command',
+        `Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.CommandLine -like '*75dff2b7*' } | ForEach-Object { $_.ProcessId }`],
+      { encoding: 'utf8', timeout: 15000, windowsHide: true })
+    return new Set(String(r.stdout || '').split(/\s+/).filter(Boolean).map(Number))
+  } catch { return new Set() }
+}
+
+function killPids(pids) {
+  for (const pid of pids) {
+    try { spawnSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', windowsHide: true }) } catch { /* 已退出 */ }
+  }
+}
+
 // ---- HTTP 服务器 ----
 function readBody(req) {
   return new Promise((res) => {
@@ -537,7 +568,15 @@ function startServer() {
         "$f.SelectedPath = '" + String(startPath).replace(/'/g, "''") + "'",
         "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }",
       ].join('; ')
+      // FolderBrowserDialog 底层是 IFileDialog COM,会激活 explorer /factory 进程;
+      // Win11 上关闭对话框后这些进程不退出(泄漏)。记录前后 PID 差集并回收,防止堆积。
+      const before = explorerFactoryPids()
       const r = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { encoding: 'utf8', timeout: 120000 })
+      const leaked = [...explorerFactoryPids()].filter((id) => !before.has(id))
+      if (leaked.length) {
+        managerLog('pick-dir: cleaned ' + leaked.length + ' leaked explorer factory pids')
+        killPids(leaked)
+      }
       const picked = String(r.stdout || '').trim().split(/\r?\n/)[0] || ''
       if (!picked) return sendJson(res, 200, { picked: null })
       const rel = relative(appRoot, picked)
@@ -685,10 +724,20 @@ function startServer() {
       const target = resolve(appRoot, body.path || 'data')
       // 白名单:只允许打开 appRoot 内的目录
       if (!target.startsWith(resolve(appRoot))) return sendJson(res, 400, { error: '路径越界' })
-      // 与 dsh-web 同款 ShellExecute 机制:spawn('explorer') 走 explorer 单实例
-      // IPC,繁忙时命令被吞(表现为没反应);cmd start 用 ShellExecute 直接打开
-      exec(`start "" "${target}"`, { windowsHide: true }).unref()
-      return sendJson(res, 200, { ok: true })
+      // ShellExecute(exec start)打开目录最终由 explorer 处理;若系统堆积大量
+      // explorer /factory 僵尸进程(Win11 Shell COM 泄漏),该通道会静默失效。
+      // 检测到异常时降级为 cmd 窗口定位目录——不依赖 explorer,必然可用。
+      const zombies = explorerFactoryPids().size
+      const degraded = zombies > 10
+      const cmd = degraded
+        ? `start "" cmd /k cd /d "${target}"`
+        : `start "" "${target}"`
+      exec(cmd, { windowsHide: true }, (err) => {
+        managerLog((err ? 'explore FAIL ' + err.message : 'explore ok') + ' (degraded=' + degraded + ') target=' + target)
+      }).unref()
+      return sendJson(res, 200, degraded
+        ? { ok: true, degraded: true, message: '检测到系统资源管理器异常(' + zombies + ' 个残留进程),已改用命令行窗口打开。建议重启电脑或重启资源管理器后恢复。' }
+        : { ok: true })
     }
 
     // ---- 清理 WebView2 缓存 ----
@@ -1018,7 +1067,10 @@ async function quickDshWeb() {
   catch (e) { alert('打开失败: ' + e.message) }
 }
 async function quickExplore(p) {
-  try { await post('/quick/explore', { path: p }) } catch (e) { alert('打开失败: ' + e.message) }
+  try {
+    var r = await post('/quick/explore', { path: p })
+    if (r.degraded) alert(r.message)
+  } catch (e) { alert('打开失败: ' + e.message) }
 }
 
 function closeModal() { $('modal-bg').style.display = 'none' }

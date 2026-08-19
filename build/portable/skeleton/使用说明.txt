@@ -53,6 +53,11 @@ DeepSeek Harness 便携版 - 使用说明
   - 端口被占用：先运行 Stop-DeepSeek-Harness.cmd，或用 dsh.cmd web --port 3081
   - 想重置：删除 data\ 文件夹
   - 杀毒软件提示：便携版不写注册表、不改系统，可放心使用
+  - 管理器中点"打开 data 目录"没反应：系统资源管理器异常（Windows 11 的
+    explorer 进程泄漏，反复使用文件夹选择框后可能堆积几十个 explorer 进程，
+    拖垮系统打开目录的通道）。重启电脑，或运行
+    taskkill /f /im explorer.exe && start explorer.exe 恢复。新版管理器会自动
+    检测到异常并改用命令行窗口打开目录，文件夹选择框也不再产生泄漏。
 
 免责声明：本便携版为第三方封装，DeepSeek Harness 本体为 MIT 开源项目，
 请遵守 DeepSeek 平台及开源许可条款。
