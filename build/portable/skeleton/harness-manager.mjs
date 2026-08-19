@@ -5,7 +5,7 @@
 //   node harness-manager.mjs --cli list|start <n>|stop <n>   # 命令行接管旧实例管理器
 //   node harness-manager.mjs [--managed] [--port <p>]        # 启动管理服务器
 // --managed:壳模式(ppid 轮询,壳崩溃即自退,防僵尸)
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, exec } from 'node:child_process'
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync,
   unlinkSync, createWriteStream, statSync, rmSync, openSync, writeSync, closeSync,
@@ -21,9 +21,11 @@ const scriptDir = dirname(fileURLToPath(import.meta.url))
 const exeEdition = existsSync(join(scriptDir, '.extracted.ok'))
 const runtimeRoot = scriptDir
 const appRoot = exeEdition ? dirname(dirname(scriptDir)) : scriptDir
-const dataRoot = join(appRoot, 'data')
-const backupsDir = join(dataRoot, 'backups')
-const managerDir = join(dataRoot, '.manager')
+let dataRoot = join(appRoot, 'data')
+// 启动配置固定在默认 data 下(不随 data 位置迁移,否则配置会"搬家")
+const launchConfigFile = join(appRoot, 'data', '.manager', 'launch.json')
+let managerDir = join(dataRoot, '.manager')
+let backupsDir = join(dataRoot, 'backups')
 const nodeExe = join(runtimeRoot, 'runtime', 'node', 'node.exe')
 const dshBin = join(runtimeRoot, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const upgradeScript = join(runtimeRoot, 'upgrade.mjs')
@@ -124,17 +126,16 @@ async function anyDshRunning() {
 }
 
 // ---- 一键启动配置 ----
-const launchConfigFile = join(managerDir, 'launch.json')
 const launchPidFile = join(managerDir, 'launch.pid')
 function defaultLaunchConfig() {
-  return { port: 3080, autoOpenBrowser: true, extraArgs: [] }
+  return { port: 3080, autoOpenBrowser: true, extraArgs: [], dataDir: '' }
 }
 function readLaunchConfig() {
   try { return { ...defaultLaunchConfig(), ...JSON.parse(readFileSync(launchConfigFile, 'utf8')) } }
   catch { return defaultLaunchConfig() }
 }
 function writeLaunchConfig(cfg) {
-  mkdirSync(managerDir, { recursive: true })
+  mkdirSync(dirname(launchConfigFile), { recursive: true })
   writeFileSync(launchConfigFile, JSON.stringify(cfg, null, 2))
 }
 function launchStatus() {
@@ -437,6 +438,17 @@ function sendJson(res, code, obj) {
   res.end(body)
 }
 function startServer() {
+  // 应用启动配置中的 data 位置(存于固定位置 launch.json;改配置需重启生效)
+  try {
+    const cfg = JSON.parse(readFileSync(launchConfigFile, 'utf8'))
+    if (cfg.dataDir && String(cfg.dataDir).trim()) {
+      const next = resolve(appRoot, cfg.dataDir)
+      if (existsSync(next) || true) dataRoot = next
+    }
+  } catch { /* 默认 data */ }
+  managerDir = join(dataRoot, '.manager')
+  backupsDir = join(dataRoot, 'backups')
+
   // Origin 防护:仅本机
   const originOk = (req) => {
     const o = req.headers.origin
@@ -497,8 +509,9 @@ function startServer() {
       cfg.port = Number(cfg.port)
       cfg.autoOpenBrowser = !!cfg.autoOpenBrowser
       if (!Array.isArray(cfg.extraArgs)) cfg.extraArgs = []
+      if (cfg.dataDir !== undefined) cfg.dataDir = String(cfg.dataDir).trim()
       writeLaunchConfig(cfg)
-      return sendJson(res, 200, { ok: true, cfg })
+      return sendJson(res, 200, { ok: true, cfg, restartNeeded: true })
     }
     if (p === '/api/launch/start' && method === 'POST') {
       return sendJson(res, 200, await launchNow())
@@ -634,7 +647,9 @@ function startServer() {
     if (p === '/api/quick/dsh-web' && method === 'POST') {
       const body = await readBody(req)
       const port = body.port || 3080
-      spawn('cmd', ['/c', 'start', '', `"http://127.0.0.1:${port}"`], { windowsHide: true }).unref()
+      // exec 走 shell:引号语义正常(spawn 会把参数内引号转义成 \" 字面量,
+      // 导致 cmd /c start 打开名为 \"...\" 的文件而无反应)
+      exec(`start "" "http://127.0.0.1:${port}"`, { windowsHide: true }).unref()
       return sendJson(res, 200, { ok: true })
     }
     if (p === '/api/quick/explore' && method === 'POST') {
@@ -642,9 +657,9 @@ function startServer() {
       const target = resolve(appRoot, body.path || 'data')
       // 白名单:只允许打开 appRoot 内的目录
       if (!target.startsWith(resolve(appRoot))) return sendJson(res, 400, { error: '路径越界' })
-      // explorer.exe 已运行时新进程会把参数丢给旧实例(参数被吞),
-      // 用 cmd /c start 最可靠
-      spawn('cmd', ['/c', 'start', '', `"${target}"`], { windowsHide: true }).unref()
+      // explorer 直接接收路径(Node 为含空格参数加引号,explorer 原生处理
+      // 多实例 IPC),比 cmd /c start 可靠
+      spawn('explorer', [target], { windowsHide: true }).unref()
       return sendJson(res, 200, { ok: true })
     }
 
@@ -942,7 +957,9 @@ async function openLaunchConfig() {
     '<label>端口(0-65535,默认 3080)</label><input id="f-lport" value="' + c.port + '">' +
     '<label style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-lbrowser" style="width:auto"' + (c.autoOpenBrowser ? ' checked' : '') + '> 启动后自动打开浏览器</label>' +
     '<label>额外 dsh 参数(空格分隔,如 --patch x.yml)</label><input id="f-largs" value="' + (c.extraArgs || []).join(' ') + '">' +
-    '<div class="row" style="margin-top:16px;justify-content:flex-end">' +
+    '<label>数据目录(data 位置,相对应用目录;留空 = 应用目录 data)</label><input id="f-ldata" value="' + (c.dataDir || '') + '" placeholder="data">' +
+    '<div class="banner" style="margin-top:12px">修改数据目录后需<b>重启管理器</b>生效(备份/插件/设置均指向新位置)。</div>' +
+    '<div class="row" style="margin-top:14px;justify-content:flex-end">' +
     '<button class="ghost" onclick="closeModal()">取消</button>' +
     '<button onclick="saveLaunchConfig()">保存</button></div>'
   $('modal-bg').style.display = 'flex'
@@ -952,9 +969,14 @@ function saveLaunchConfig() {
     port: parseInt($('f-lport').value || '3080', 10),
     autoOpenBrowser: $('f-lbrowser').checked,
     extraArgs: $('f-largs').value.trim() ? $('f-largs').value.trim().split(/\\s+/) : [],
+    dataDir: $('f-ldata').value.trim(),
   }
   api('/launch/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
-    .then(function () { closeModal(); refreshLaunchState() })
+    .then(function () {
+      closeModal()
+      alert('已保存。若修改了数据目录,请重启管理器(关闭窗口重新打开)使其生效。')
+      refreshLaunchState()
+    })
     .catch(function (e) { alert('保存失败: ' + e.message) })
 }
 async function quickDshWeb() {
@@ -973,11 +995,12 @@ async function refreshPlugins() {
     var profile = $('plug-profile').value
     var r = await api('/plugins?profile=' + profile)
     $('plug-tbody').innerHTML = r.plugins.map(function (p) {
-      var stateBtn = p.enabled
-        ? '<button class="sm ghost" onclick="pluginState(\\'' + p.name + '\\',false)">禁用</button>'
-        : '<button class="sm" onclick="pluginState(\\'' + p.name + '\\',true)">启用</button>'
-      return '<tr><td>' + p.name + (p.enabled ? '' : ' <span class="badge">已禁用</span>') + '</td><td>' + p.version + '</td><td style="width:180px">' +
-        stateBtn + ' <button class="sm danger" onclick="pluginRemove(\\'' + p.name + '\\')">移除</button></td></tr>'
+      // 启用 / 禁用 / 移除三个功能;当前状态对应的按钮禁用
+      var enableBtn = '<button class="sm"' + (p.enabled ? ' disabled' : '') + ' onclick="pluginState(\\'' + p.name + '\\',true)">启用</button>'
+      var disableBtn = '<button class="sm ghost"' + (p.enabled ? '' : ' disabled') + ' onclick="pluginState(\\'' + p.name + '\\',false)">禁用</button>'
+      var removeBtn = '<button class="sm danger" onclick="pluginRemove(\\'' + p.name + '\\')">移除</button>'
+      return '<tr><td>' + p.name + (p.enabled ? '' : ' <span class="badge">已禁用</span>') + '</td><td>' + p.version + '</td><td style="width:230px">' +
+        enableBtn + ' ' + disableBtn + ' ' + removeBtn + '</td></tr>'
     }).join('') || '<tr><td colspan="3" style="color:var(--dim)">(无插件)</td></tr>'
   } catch (e) { msg($('plug-msg'), 'err', e.message) }
 }
