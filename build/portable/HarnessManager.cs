@@ -63,6 +63,27 @@ class HarnessManager
             {
                 runtimeRoot = exeDir;
                 appRoot = exeDir;
+                // exe 旁的副本(由 launcher 复制,方便双击):本身没有 runtime,
+                // 从 exe 旁的 portable\<version> 缓存定位运行时;data 仍在 exe 旁
+                // (与 exe 启动的默认实例一致)。
+                if (!File.Exists(Path.Combine(exeDir, @"runtime\node\node.exe")))
+                {
+                    string cacheBase = Path.Combine(exeDir, "portable");
+                    if (Directory.Exists(cacheBase))
+                    {
+                        string best = null;
+                        foreach (string dir in Directory.GetDirectories(cacheBase))
+                        {
+                            string name = Path.GetFileName(dir);
+                            if (File.Exists(Path.Combine(dir, ".extracted.ok")))
+                            {
+                                if (best == null || string.Compare(name, best, StringComparison.Ordinal) > 0)
+                                    best = name;
+                            }
+                        }
+                        if (best != null) runtimeRoot = Path.Combine(cacheBase, best);
+                    }
+                }
             }
             nodeExe = Path.Combine(runtimeRoot, @"runtime\node\node.exe");
             managerScript = Path.Combine(runtimeRoot, "harness-manager.mjs");

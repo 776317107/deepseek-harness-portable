@@ -157,6 +157,25 @@ class DshLauncher
                 if (!File.Exists(mgrExe)) throw new Exception("HarnessManager.exe missing in this payload: " + mgrExe);
                 try
                 {
+                    // 复制壳到 exe 旁(缺失或旧版时),用户双击 exe 旁的管理器即可;
+                    // 副本的运行时从 portable\<version> 缓存定位,data 用 exe 旁。
+                    string[] mgrFiles = {
+                        "HarnessManager.exe", "WebView2Loader.dll",
+                        "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll",
+                        "harness-manager.mjs",
+                    };
+                    foreach (string f in mgrFiles)
+                    {
+                        string src = Path.Combine(install, f);
+                        string dst = Path.Combine(exeDir, f);
+                        if (File.Exists(src) && (!File.Exists(dst) ||
+                            File.GetLastWriteTimeUtc(dst) < File.GetLastWriteTimeUtc(src)))
+                        {
+                            File.Copy(src, dst, true);
+                        }
+                    }
+                    string sideExe = Path.Combine(exeDir, "HarnessManager.exe");
+                    if (File.Exists(sideExe)) mgrExe = sideExe;
                     var mgrPsi = new ProcessStartInfo(mgrExe) { UseShellExecute = true };
                     Process.Start(mgrPsi);
                     return 0;

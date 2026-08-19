@@ -19,8 +19,17 @@ import { EventEmitter } from 'node:events'
 // ---- 形态与路径 ----
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const exeEdition = existsSync(join(scriptDir, '.extracted.ok'))
-const runtimeRoot = scriptDir
+let runtimeRoot = scriptDir
 const appRoot = exeEdition ? dirname(dirname(scriptDir)) : scriptDir
+// exe 旁的副本(launcher 复制的,方便双击):本身无 runtime,
+// 从 appRoot\portable\<version> 缓存定位运行时;data 仍在 exe 旁。
+if (!exeEdition && !existsSync(join(scriptDir, 'runtime', 'node', 'node.exe'))) {
+  const cacheBase = join(scriptDir, 'portable')
+  if (existsSync(cacheBase)) {
+    const vers = readdirSync(cacheBase).filter((n) => existsSync(join(cacheBase, n, '.extracted.ok')))
+    if (vers.length) runtimeRoot = join(cacheBase, vers.sort().pop())
+  }
+}
 let dataRoot = join(appRoot, 'data')
 // 启动配置固定在默认 data 下(不随 data 位置迁移,否则配置会"搬家")
 const launchConfigFile = join(appRoot, 'data', '.manager', 'launch.json')
