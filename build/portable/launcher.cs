@@ -109,11 +109,20 @@ class DshLauncher
             if (needsExtract)
             {
                 Console.Error.WriteLine("dsh: extracting embedded runtime to " + install);
-                try
+                if (Directory.Exists(install))
                 {
-                    if (Directory.Exists(install)) Directory.Delete(install, true);
+                    try { Directory.Delete(install, true); }
+                    catch
+                    {
+                        // 旧缓存被运行中的实例占用:覆盖式解压会在占用文件处崩溃,
+                        // 留下一半新一半旧的损坏缓存。直接报错,请用户先关闭实例。
+                        Console.Error.WriteLine("dsh: 缓存目录正被运行中的实例占用(通常是还在运行的 Web UI 或管理器窗口)。");
+                        Console.Error.WriteLine("请先关闭所有 DeepSeek Harness 窗口/管理器,再重新运行本程序。");
+                        Console.Error.WriteLine("Press Enter to exit...");
+                        try { Console.ReadLine(); } catch { }
+                        return 1;
+                    }
                 }
-                catch { Console.Error.WriteLine("dsh: could not clean previous extraction; extracting over it"); }
                 Directory.CreateDirectory(install);
                 ExtractResource("dsh.zip", install);
                 string nodeDir = Path.GetDirectoryName(nodeExe);
