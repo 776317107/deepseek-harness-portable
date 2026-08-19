@@ -516,6 +516,25 @@ function startServer() {
     if (p === '/api/launch/start' && method === 'POST') {
       return sendJson(res, 200, await launchNow())
     }
+    // 系统文件夹选择框(PowerShell WinForms),返回所选路径(相对 appRoot)
+    if (p === '/api/launch/pick-dir' && method === 'POST') {
+      const startPath = readLaunchConfig().dataDir
+        ? resolve(appRoot, readLaunchConfig().dataDir)
+        : dataRoot
+      const ps = [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        '$f = New-Object System.Windows.Forms.FolderBrowserDialog',
+        "$f.Description = '选择数据目录(DSH_HOME)'",
+        "$f.SelectedPath = '" + String(startPath).replace(/'/g, "''") + "'",
+        "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }",
+      ].join('; ')
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { encoding: 'utf8', timeout: 120000 })
+      const picked = String(r.stdout || '').trim().split(/\r?\n/)[0] || ''
+      if (!picked) return sendJson(res, 200, { picked: null })
+      const rel = relative(appRoot, picked)
+      const out = rel && !rel.startsWith('..') ? rel : picked
+      return sendJson(res, 200, { picked: out, absolute: picked })
+    }
 
     // 检测运行中的 dsh 服务(如 exe/dsh.cmd 启动的默认实例),可一键停止
     if (p === '/api/detect/services' && method === 'GET') {
@@ -957,12 +976,18 @@ async function openLaunchConfig() {
     '<label>端口(0-65535,默认 3080)</label><input id="f-lport" value="' + c.port + '">' +
     '<label style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-lbrowser" style="width:auto"' + (c.autoOpenBrowser ? ' checked' : '') + '> 启动后自动打开浏览器</label>' +
     '<label>额外 dsh 参数(空格分隔,如 --patch x.yml)</label><input id="f-largs" value="' + (c.extraArgs || []).join(' ') + '">' +
-    '<label>数据目录(data 位置,相对应用目录;留空 = 应用目录 data)</label><input id="f-ldata" value="' + (c.dataDir || '') + '" placeholder="data">' +
+    '<label>数据目录(data 位置;留空 = 应用目录 data)</label>' +
+    '<div class="row"><input id="f-ldata" value="' + (c.dataDir || '') + '" placeholder="data" class="grow"><button class="ghost" onclick="pickDataDir()">浏览…</button></div>' +
     '<div class="banner" style="margin-top:12px">修改数据目录后需<b>重启管理器</b>生效(备份/插件/设置均指向新位置)。</div>' +
     '<div class="row" style="margin-top:14px;justify-content:flex-end">' +
     '<button class="ghost" onclick="closeModal()">取消</button>' +
     '<button onclick="saveLaunchConfig()">保存</button></div>'
   $('modal-bg').style.display = 'flex'
+}
+function pickDataDir() {
+  post('/launch/pick-dir').then(function (r) {
+    if (r.picked) $('f-ldata').value = r.picked
+  }).catch(function (e) { alert('选择失败: ' + e.message) })
 }
 function saveLaunchConfig() {
   var cfg = {
